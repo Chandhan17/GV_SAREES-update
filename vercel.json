@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/$1"
+    },
+    {
+      "source": "/((?!api/|@vite/|@react-refresh|src/|node_modules/|@id/|@fs/).*)",
+      "destination": "/index.html"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/reservations/cleanup",
+      "schedule": "*/5 * * * *"
+    }
+  ]
+}

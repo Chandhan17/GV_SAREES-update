@@ -1,0 +1,56 @@
+export const clientConfig = {
+  brandName: 'GV Sarees',
+  tagline: 'A considered edit of sarees for everyday elegance and celebrations.',
+  phone: '',
+  whatsapp: '',
+  email: '',
+  address: '',
+  instagram: '',
+  logo: '/logo.png',
+  announcement: 'Discover thoughtfully chosen sarees for every celebration.',
+  content: {
+    heroEyebrow: 'The GV Sarees edit',
+    heroTitle: 'Sarees with a story to tell.',
+    heroDescription: 'Explore graceful drapes, rich textures and timeless colours selected for the moments that matter.',
+    collectionKicker: 'Shop by collections',
+    collectionTitle: 'Shop by collections',
+    aboutKicker: 'About GV Sarees',
+    aboutTitle: 'A thoughtful wardrobe of Indian textiles.',
+    aboutDescription: 'From festive silk to easy everyday weaves, GV Sarees brings together beautiful drapes chosen to feel special, comfortable and enduring.',
+  },
+  navigation: [
+    { label: 'Home', to: '/' },
+    { label: 'Shop All', to: '/products' },
+    {
+      label: 'Sarees',
+      to: '/products?search=saree',
+      children: [
+        { label: 'Pattu Sarees', to: '/products?category=Pattu' },
+        { label: 'Fancy Sarees', to: '/products?category=Fancy' },
+        { label: 'Designer Sarees', to: '/products?category=Bridal%20Collection' },
+        { label: 'Cotton Sarees', to: '/products?category=Cotton' },
+      ],
+    },
+    { label: 'Dress Materials', to: '/products?category=Dress%20materials' },
+    { label: 'Blouses', to: '/products?search=blouse' },
+    { label: 'New Arrivals', to: '/products?sort=newest' },
+  ],
+  theme: {
+    softWhite: '#FFF8F7',
+    lightBlush: '#F8E9E7',
+    paleRose: '#EBD1CB',
+    roseGold: '#D8ADA5',
+    dustyRose: '#92716C',
+    heading: '#4A1718',
+    secondary: '#92716C',
+    buttonText: '#4A1718',
+    burgundy: '#4A1718',
+    white: '#FFFFFF',
+    cardWhite: '#FFFFFF',
+  },
+  heroImages: [
+    '/Banner.png',
+  ],
+}
+
+export default clientConfig

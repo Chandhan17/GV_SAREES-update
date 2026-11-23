@@ -1,0 +1,71 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=Playfair+Display:wght@500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-soft-white-rgb: 255 248 247;
+  --color-light-blush-rgb: 248 233 231;
+  --color-pale-rose-rgb: 235 209 203;
+  --color-rose-gold-rgb: 216 173 165;
+  --color-dusty-rose-rgb: 146 113 108;
+  --color-heading-rgb: 74 23 24;
+  --color-burgundy-rgb: 74 23 24;
+  --color-secondary-rgb: 146 113 108;
+  --color-button-text-rgb: 74 23 24;
+  --color-accent-rgb: 216 173 165;
+  --color-card-white-rgb: 255 255 255;
+  --color-white-rgb: 255 255 255;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  font-family: 'DM Sans', sans-serif;
+  background-color: rgb(var(--color-soft-white-rgb));
+  color: rgb(var(--color-burgundy-rgb));
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: rgb(var(--color-rose-gold-rgb) / 0.3);
+}
+
+@layer components {
+  .btn-gold {
+    @apply inline-flex items-center justify-center gap-2 rounded-full bg-brand-rose-gold px-5 py-3 text-sm font-semibold text-brand-button-text transition duration-300 hover:bg-brand-accent hover:text-brand-burgundy focus:outline-none focus:ring-2 focus:ring-brand-rose-gold focus:ring-offset-2;
+  }
+
+  .btn-outline {
+    @apply inline-flex items-center justify-center gap-2 rounded-full border border-brand-pale-rose px-5 py-3 text-sm font-medium text-brand-burgundy transition hover:border-brand-rose-gold hover:bg-brand-blush focus:outline-none focus:ring-2 focus:ring-brand-rose-gold focus:ring-offset-2;
+  }
+
+  .input-field {
+    @apply w-full rounded-xl border border-brand-pale-rose bg-brand-white px-4 py-3 text-sm text-brand-burgundy outline-none transition placeholder:text-brand-dusty focus:border-brand-rose-gold focus:ring-2 focus:ring-brand-rose-gold/20;
+  }
+
+  .section-kicker {
+    @apply text-[0.68rem] font-semibold uppercase tracking-[0.28em] text-brand-rose-gold;
+  }
+
+  .section-title {
+    @apply mt-2 font-display text-4xl leading-[1.05] text-brand-burgundy md:text-5xl;
+  }
+
+  .nav-link {
+    @apply relative text-brand-burgundy transition hover:text-brand-rose-gold focus:outline-none focus-visible:text-brand-rose-gold;
+  }
+
+  .eyebrow-line {
+    @apply inline-flex items-center gap-3 text-[0.68rem] font-semibold uppercase tracking-[0.28em] text-brand-rose-gold;
+  }
+
+  .eyebrow-line::before {
+    content: '';
+    @apply h-px w-8 bg-brand-rose-gold;
+  }
+}

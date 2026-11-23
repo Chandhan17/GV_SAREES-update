@@ -1,0 +1,44 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isAuthed() { return request.auth != null; }
+    function isAdmin() {
+      return isAuthed() &&
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.isAdmin == true;
+    }
+
+    match /products/{id} {
+      allow read: if true;
+      allow create: if isAdmin() &&
+        request.resource.data.totalStock is int &&
+        request.resource.data.totalStock >= 0 &&
+        request.resource.data.reservedStock == 0 &&
+        request.resource.data.availableStock == request.resource.data.totalStock &&
+        request.resource.data.inStock == (request.resource.data.totalStock > 0) &&
+        request.resource.data.lowStockThreshold is int &&
+        request.resource.data.lowStockThreshold >= 0;
+      allow update: if isAdmin() &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'name', 'price', 'category', 'description', 'fabric', 'images',
+          'sizeLength', 'sizeChartText', 'sizeChartImage', 'originalPrice',
+          'compareAtPrice', 'regularPrice', 'mrp'
+        ]);
+      allow delete: if false;
+    }
+
+    match /orders/{id} {
+      allow read: if isAdmin();
+      allow create, update, delete: if false;
+    }
+
+    match /admins/{uid} {
+      allow read: if isAdmin() && request.auth.uid == uid;
+      allow write: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
