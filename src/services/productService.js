@@ -1,12 +1,10 @@
 import {
-  addDoc,
   collection,
   doc,
   getDoc,
   getDocs,
   orderBy,
   query,
-  serverTimestamp,
   updateDoc,
 } from 'firebase/firestore'
 import { auth, db } from './firebase'
@@ -85,26 +83,45 @@ export async function fetchProductById(productId) {
   return normalizeProduct(snapshot)
 }
 
-export async function createProduct(payload) {
-  const totalStock = Math.max(0, Number.isInteger(payload.totalStock) ? payload.totalStock : 0)
-  const lowStockThreshold = Math.max(0, Number.isInteger(payload.lowStockThreshold) ? payload.lowStockThreshold : 2)
+export async function createProduct(payload, idempotencyKey) {
+  const token = await auth.currentUser?.getIdToken()
+  if (!token) throw new Error('Authentication required.')
+  if (typeof idempotencyKey !== 'string' || !/^[A-Za-z0-9_-]{16,128}$/.test(idempotencyKey)) {
+    throw new Error('A valid idempotency key is required.')
+  }
+
   const data = {
-    ...payload,
+    action: 'create',
+    name: payload.name,
+    price: payload.price,
+    category: payload.category,
+    description: payload.description,
+    fabric: payload.fabric,
     images: normalizeImages(payload.images || []),
+    sizeLength: payload.sizeLength || '',
+    sizeChartText: payload.sizeChartText || '',
     ...(Object.prototype.hasOwnProperty.call(payload, 'sizeChartImage')
       ? { sizeChartImage: normalizeImageUrl(payload.sizeChartImage) }
       : {}),
-    totalStock,
-    reservedStock: 0,
-    availableStock: totalStock,
-    inStock: totalStock > 0,
-    lowStockThreshold,
-    createdAt: serverTimestamp(),
+    totalStock: Math.max(0, Number.isInteger(payload.totalStock) ? payload.totalStock : 0),
+    lowStockThreshold: Math.max(0, Number.isInteger(payload.lowStockThreshold) ? payload.lowStockThreshold : 2),
   }
 
-  const docRef = await addDoc(productsCollection, data)
+  const response = await fetch('/api/admin/products', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': idempotencyKey,
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(data),
+  })
+  const body = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(body.message || 'Unable to create product.')
+  if (!body.productId) throw new Error('Product creation returned no product ID.')
+
   invalidateProductsCache()
-  return docRef.id
+  return body.productId
 }
 
 export async function editProduct(productId, payload) {

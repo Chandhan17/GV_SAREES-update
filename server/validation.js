@@ -1,5 +1,34 @@
 import { z } from 'zod'
 
+const imageMetadataSchema = z.object({
+  url: z.string().max(2048).optional(),
+  public_id: z.string().max(256).nullable().optional(),
+  file_id: z.string().max(512).nullable().optional(),
+  file_path: z.string().max(1024).nullable().optional(),
+  telegram_message_id: z.union([z.number().int().positive(), z.string().regex(/^[0-9]+$/)]).nullable().optional(),
+  telegram_chat_id: z.union([z.string(), z.number()]).nullable().optional(),
+}).strict()
+
+const productImageSchema = z.union([
+  z.string().max(2048),
+  imageMetadataSchema,
+])
+
+export const productCreateSchema = z.object({
+  action: z.literal('create'),
+  name: z.string().trim().min(1).max(120),
+  price: z.number().finite().positive().max(50000000),
+  category: z.string().trim().min(1).max(100),
+  description: z.string().trim().min(1).max(5000),
+  fabric: z.string().trim().min(1).max(100),
+  images: z.array(productImageSchema).min(1).max(50),
+  sizeLength: z.string().trim().max(100).default(''),
+  sizeChartText: z.string().trim().max(500).default(''),
+  sizeChartImage: z.union([z.string().max(2048), imageMetadataSchema, z.null()]).optional(),
+  totalStock: z.number().int().min(0).max(100000),
+  lowStockThreshold: z.number().int().min(0).max(100000),
+}).strict()
+
 export const deleteTelegramSchema = z.object({
   items: z
     .array(

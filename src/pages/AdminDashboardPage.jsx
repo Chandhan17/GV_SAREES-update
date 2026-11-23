@@ -1,4 +1,4 @@
-import { createElement, useEffect, useMemo, useState } from 'react'
+import { createElement, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { AlertCircle, CheckCircle2, Package, Plus, ShoppingCart, X } from 'lucide-react'
 import { categories, getFabricsForCategory } from '../config/categories'
@@ -74,6 +74,17 @@ export default function AdminDashboardPage() {
   const [newImages, setNewImages] = useState([])
   const [newImagePreviews, setNewImagePreviews] = useState([])
   const [sizeChartFile, setSizeChartFile] = useState(null)
+  const productCreationKeyRef = useRef('')
+
+  function generateProductCreationKey() {
+    if (productCreationKeyRef.current) return productCreationKeyRef.current
+    const generated = globalThis.crypto?.randomUUID?.().replace(/-/g, '')
+    productCreationKeyRef.current =
+      typeof generated === 'string' && /^[A-Za-z0-9_-]{16,128}$/.test(generated)
+        ? generated
+        : `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`
+    return productCreationKeyRef.current
+  }
 
   useEffect(() => {
     fetchProducts(true).then(setProducts).catch((err) => setError(err.message || 'Failed to load products.')).finally(() => setLoadingProducts(false))
@@ -108,6 +119,7 @@ export default function AdminDashboardPage() {
 
   const resetForm = () => {
     setForm(initialForm); setEditingId(''); setExistingImages([]); setRemovedImages([]); clearNewImageState(); setSizeChartFile(null)
+    productCreationKeyRef.current = ''
   }
 
   const handleImageSelect = (event) => {
@@ -162,7 +174,7 @@ export default function AdminDashboardPage() {
           ...payload,
           totalStock: Math.max(0, Number(form.totalStock) || 0),
           lowStockThreshold: Math.max(0, Number(form.lowStockThreshold) || 0),
-        }); success('Product added successfully.')
+        }, generateProductCreationKey()); success('Product added successfully.')
       }
       setProducts(await fetchProducts(true)); resetForm()
     } catch (err) {

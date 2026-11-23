@@ -10,14 +10,7 @@ service cloud.firestore {
 
     match /products/{id} {
       allow read: if true;
-      allow create: if isAdmin() &&
-        request.resource.data.totalStock is int &&
-        request.resource.data.totalStock >= 0 &&
-        request.resource.data.reservedStock == 0 &&
-        request.resource.data.availableStock == request.resource.data.totalStock &&
-        request.resource.data.inStock == (request.resource.data.totalStock > 0) &&
-        request.resource.data.lowStockThreshold is int &&
-        request.resource.data.lowStockThreshold >= 0;
+      allow create: if false;
       allow update: if isAdmin() &&
         request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           'name', 'price', 'category', 'description', 'fabric', 'images',
