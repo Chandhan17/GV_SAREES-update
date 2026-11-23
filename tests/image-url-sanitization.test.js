@@ -97,5 +97,6 @@ test('normalizes direct Telegram URLs nested inside existing proxy URLs', () => 
 test('product reads and writes normalize the size-chart URL', () => {
   const service = readFileSync(new URL('../src/services/productService.js', import.meta.url), 'utf8')
   assert.match(service, /sizeChartImage:\s*normalizeImageUrl\(data\.sizeChartImage\)/)
-  assert.equal((service.match(/sizeChartImage:\s*normalizeImageUrl\(payload\.sizeChartImage\)/g) || []).length, 2)
+  assert.match(service, /sizeChartImage:\s*normalizeImageUrl\(payload\.sizeChartImage\)/)
+  assert.match(service, /data\.sizeChartImage\s*=\s*normalizeImageUrl\(payload\.sizeChartImage\)/)
 })

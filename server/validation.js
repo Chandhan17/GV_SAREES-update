@@ -29,6 +29,39 @@ export const productCreateSchema = z.object({
   lowStockThreshold: z.number().int().min(0).max(100000),
 }).strict()
 
+export const productUpdateSchema = z.object({
+  action: z.literal('update'),
+  productId: z.string().min(1).max(128),
+  name: z.string().trim().min(1).max(120).optional(),
+  price: z.number().finite().positive().max(50000000).optional(),
+  category: z.string().trim().min(1).max(100).optional(),
+  description: z.string().trim().min(1).max(5000).optional(),
+  fabric: z.string().trim().min(1).max(100).optional(),
+  images: z.array(productImageSchema).min(1).max(50).optional(),
+  sizeLength: z.string().trim().max(100).optional(),
+  sizeChartText: z.string().trim().max(500).optional(),
+  sizeChartImage: z.union([z.string().max(2048), imageMetadataSchema, z.null()]).optional(),
+}).strict().superRefine((value, context) => {
+  const editableFields = [
+    'name',
+    'price',
+    'category',
+    'description',
+    'fabric',
+    'images',
+    'sizeLength',
+    'sizeChartText',
+    'sizeChartImage',
+  ]
+  if (!editableFields.some((field) => Object.prototype.hasOwnProperty.call(value, field))) {
+    context.addIssue({
+      code: 'custom',
+      message: 'At least one editable product field is required.',
+      path: ['product'],
+    })
+  }
+})
+
 export const deleteTelegramSchema = z.object({
   items: z
     .array(

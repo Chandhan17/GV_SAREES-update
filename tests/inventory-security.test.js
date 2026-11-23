@@ -243,9 +243,8 @@ test('inventory migration patch is repeatable and preserves reserved stock witho
 test('Firestore rules deny all direct order writes and constrain product updates to content fields', () => {
   const rules = readFileSync(new URL('../firestore.rules', import.meta.url), 'utf8')
   assert.match(rules, /match \/orders\/\{id\}[\s\S]*allow create, update, delete: if false;/)
-  assert.match(rules, /request\.resource\.data\.diff\(resource\.data\)\.affectedKeys\(\)\.hasOnly/)
-  assert.match(rules, /'name', 'price', 'category', 'description'/)
-  assert.doesNotMatch(rules, /hasOnly\([\s\S]*'totalStock'/)
+  assert.match(rules, /match \/products\/\{id\}[\s\S]*allow update: if false;/)
+  assert.doesNotMatch(rules, /allow update: if isAdmin/)
 })
 
 test('Razorpay order creation endpoint is disabled pending a complete payment lifecycle', () => {

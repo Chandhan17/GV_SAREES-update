@@ -5,7 +5,7 @@ import { FieldValue, Timestamp } from 'firebase-admin/firestore'
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import { normalizeImageUrl, normalizeImages } from '../../src/utils/imageHelpers.js'
-import { productCreateSchema } from '../../server/validation.js'
+import { productCreateSchema, productUpdateSchema } from '../../server/validation.js'
 
 const deleteSchema = z.object({
   action: z.literal('delete'),
@@ -145,6 +145,41 @@ export function createAdminProductsHandler({
       if (error?.code === 'IDEMPOTENCY_CONFLICT') return sendError(res, 409, error.message)
       if (error?.code === 'IDEMPOTENCY_PENDING') return sendError(res, 409, error.message)
       return sendError(res, 500, 'Unable to create product.')
+    }
+  }
+
+  if (body?.action === 'update') {
+    const parse = productUpdateSchema.safeParse(body)
+    if (!parse.success) return sendError(res, 400, 'Invalid product update request', parse.error.format())
+
+    const updates = { ...parse.data }
+    delete updates.action
+    delete updates.productId
+
+    if (Object.prototype.hasOwnProperty.call(updates, 'images')) {
+      const images = normalizeImages(updates.images)
+      if (!images.length) return sendError(res, 400, 'At least one valid product image is required.')
+      updates.images = images
+    }
+    if (Object.prototype.hasOwnProperty.call(updates, 'sizeChartImage')) {
+      updates.sizeChartImage = normalizeImageUrl(updates.sizeChartImage)
+    }
+
+    try {
+      await firestore.runTransaction(async (transaction) => {
+        const productRef = firestore.collection('products').doc(parse.data.productId)
+        const snapshot = await transaction.get(productRef)
+        if (!snapshot.exists) {
+          throw Object.assign(new Error('Product not found.'), { code: 'PRODUCT_NOT_FOUND' })
+        }
+        transaction.update(productRef, updates)
+      })
+      return res.status(200).json({ success: true, productId: parse.data.productId })
+    } catch (error) {
+      if (error?.code === 'PRODUCT_NOT_FOUND') {
+        return sendError(res, 404, error.message)
+      }
+      return sendError(res, 500, 'Unable to update product.')
     }
   }
 

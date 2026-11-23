@@ -5,7 +5,6 @@ import {
   getDocs,
   orderBy,
   query,
-  updateDoc,
 } from 'firebase/firestore'
 import { auth, db } from './firebase'
 import { normalizeImageUrl, normalizeImages } from '../utils/imageHelpers'
@@ -125,15 +124,39 @@ export async function createProduct(payload, idempotencyKey) {
 }
 
 export async function editProduct(productId, payload) {
-  const productRef = doc(db, 'products', productId)
-  await updateDoc(productRef, {
-    ...payload,
-    images: normalizeImages(payload.images || []),
-    ...(Object.prototype.hasOwnProperty.call(payload, 'sizeChartImage')
-      ? { sizeChartImage: normalizeImageUrl(payload.sizeChartImage) }
-      : {}),
+  const token = await auth.currentUser?.getIdToken()
+  if (!token) throw new Error('Authentication required.')
+
+  const data = {
+    action: 'update',
+    productId,
+  }
+  for (const field of ['name', 'price', 'category', 'description', 'fabric', 'sizeLength', 'sizeChartText']) {
+    if (Object.prototype.hasOwnProperty.call(payload, field)) {
+      data[field] = payload[field]
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, 'images')) {
+    data.images = normalizeImages(payload.images || [])
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, 'sizeChartImage')) {
+    data.sizeChartImage = normalizeImageUrl(payload.sizeChartImage)
+  }
+
+  const response = await fetch('/api/admin/products', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(data),
   })
+  const body = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(body.message || 'Unable to update product.')
+  if (!body.productId) throw new Error('Product update returned no product ID.')
+
   invalidateProductsCache()
+  return body.productId
 }
 
 export async function removeProduct(productId) {

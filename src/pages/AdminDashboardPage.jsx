@@ -6,7 +6,6 @@ import { useToast } from '../hooks/useToast'
 import { createProduct, editProduct, fetchProducts, removeProduct } from '../services/productService'
 import { subscribeOrders } from '../services/orderService'
 import { uploadMultipleImages, uploadSingleImage } from '../services/telegramUploadService'
-import { deleteTelegramMedia } from '../services/telegramMediaService'
 import { adjustProductInventory } from '../services/reservationService'
 import { formatINR } from '../utils/formatters'
 import { getImageUrl, getPrimaryImageUrl, normalizeImages } from '../utils/imageHelpers'
@@ -161,7 +160,6 @@ export default function AdminDashboardPage() {
         sizeChartImage: sizeChartImageUrl,
       }
       if (editingId) {
-        if (removedImages.length) await deleteTelegramMedia(removedImages)
         await adjustProductInventory({
           productId: editingId,
           quantityChange: stockAdjustment,
