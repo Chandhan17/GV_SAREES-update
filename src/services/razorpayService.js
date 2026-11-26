@@ -91,6 +91,7 @@ export function openRazorpayCheckout({ order, customer, productName }) {
 
   return new Promise((resolve, reject) => {
     let settled = false
+    const failedPayments = []
     const finish = (result) => {
       if (settled) return
       settled = true
@@ -112,19 +113,30 @@ export function openRazorpayCheckout({ order, customer, productName }) {
         finish({ type: 'success', payment: response })
       },
       modal: {
-        ondismiss: () => finish({ type: 'cancelled' }),
+        ondismiss: () => {
+          const lastFailure = failedPayments[failedPayments.length - 1]
+          finish(lastFailure
+            ? { type: 'failed', ...lastFailure, failedPayments }
+            : { type: 'cancelled' })
+        },
       },
     }
 
     try {
       const checkout = new window.Razorpay(options)
       checkout.on('payment.failed', (failure) => {
+        if (settled) return
         const metadata = failure?.error?.metadata || {}
-        finish({
-          type: 'failed',
+        const failedPayment = {
           orderId: metadata.order_id || failure?.payment?.order_id || order.razorpayOrderId,
           paymentId: metadata.payment_id || failure?.payment?.id || '',
-        })
+        }
+        if (!failedPayments.some((paymentAttempt) => (
+          paymentAttempt.orderId === failedPayment.orderId
+          && paymentAttempt.paymentId === failedPayment.paymentId
+        ))) {
+          failedPayments.push(failedPayment)
+        }
       })
       checkout.open()
     } catch (error) {
@@ -345,7 +357,9 @@ export async function checkoutReservation({
       return reconcileDismissedCheckout()
     }
     if (checkoutResult.type === 'failed') {
-      return reconcileCheckoutAttempt(checkoutResult.paymentId)
+      return reconcileCheckoutAttempt(
+        checkoutResult.failedPayments?.length ? undefined : checkoutResult.paymentId,
+      )
     }
     if (checkoutResult.type !== 'success') {
       throw new Error('Razorpay Checkout returned an unrecognized result.')

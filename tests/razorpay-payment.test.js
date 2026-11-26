@@ -454,6 +454,33 @@ test('verification API returns only the server-verified payment state', async ()
   assert.equal(response.headers['Cache-Control'], 'no-store')
 })
 
+test('verification API rejects a success callback without a signature', async () => {
+  const response = createApiResponse()
+  let verifyCalls = 0
+  let failureCalls = 0
+  await verifyHandler({
+    method: 'POST',
+    body: {
+      razorpay_order_id: 'order_mock1',
+      razorpay_payment_id: 'pay_mock1',
+    },
+  }, response, {
+    verifyPayment: async () => {
+      verifyCalls += 1
+      return { status: 'captured' }
+    },
+    recordFailure: async () => {
+      failureCalls += 1
+      return { status: 'captured' }
+    },
+    rateLimit: () => true,
+  })
+
+  assert.equal(response.statusCode, 400)
+  assert.equal(verifyCalls, 0)
+  assert.equal(failureCalls, 0)
+})
+
 test('verification API accepts a failure callback without a payment ID for reconciliation', async () => {
   const response = createApiResponse()
   let received

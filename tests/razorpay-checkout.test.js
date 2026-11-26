@@ -97,13 +97,16 @@ test('Razorpay success returns payment details without opening a WhatsApp popup'
 test('Razorpay payment failure does not open a WhatsApp popup', async (t) => {
   const originalWindow = globalThis.window
   let failureHandler
+  let checkoutOptions
   let popupCalls = 0
   globalThis.window = {
     open() {
       popupCalls += 1
     },
     Razorpay: class {
-      constructor() {}
+      constructor(options) {
+        checkoutOptions = options
+      }
 
       on(event, callback) {
         if (event === 'payment.failed') failureHandler = callback
@@ -111,6 +114,7 @@ test('Razorpay payment failure does not open a WhatsApp popup', async (t) => {
 
       open() {
         failureHandler({ error: { metadata: { payment_id: 'pay_failed' } } })
+        checkoutOptions.modal.ondismiss()
       }
     },
   }
@@ -126,7 +130,132 @@ test('Razorpay payment failure does not open a WhatsApp popup', async (t) => {
   })
 
   assert.equal(result.type, 'failed')
+  assert.equal(result.paymentId, 'pay_failed')
   assert.equal(popupCalls, 0)
+})
+
+test('a failed attempt does not prevent a later success callback in the same modal', async (t) => {
+  const originalWindow = globalThis.window
+  let checkoutOptions
+  let failureHandler
+  const successfulPayment = {
+    ...payment,
+    razorpay_payment_id: 'pay_retry_success',
+    razorpay_signature: 'retry-signature',
+  }
+  globalThis.window = {
+    Razorpay: class {
+      constructor(options) {
+        checkoutOptions = options
+      }
+
+      on(event, callback) {
+        if (event === 'payment.failed') failureHandler = callback
+      }
+
+      open() {
+        failureHandler({
+          error: {
+            metadata: {
+              order_id: order.razorpayOrderId,
+              payment_id: 'pay_first_failed',
+            },
+          },
+        })
+        checkoutOptions.handler(successfulPayment)
+        failureHandler({
+          error: {
+            metadata: {
+              order_id: order.razorpayOrderId,
+              payment_id: 'pay_late_stale_failure',
+            },
+          },
+        })
+        checkoutOptions.modal.ondismiss()
+      }
+    },
+  }
+  t.after(() => {
+    if (originalWindow === undefined) delete globalThis.window
+    else globalThis.window = originalWindow
+  })
+
+  const { dependencies, calls } = createDependencies()
+  calls.statuses.push(
+    { paymentStatus: 'pending' },
+    {
+      paymentStatus: 'captured',
+      orderStatus: 'confirmed',
+      orderId: 'reservation-order-1',
+      paymentId: successfulPayment.razorpay_payment_id,
+    },
+  )
+  dependencies.openCheckout = undefined
+
+  const result = await checkoutReservation(
+    { item, customer, productName: 'Test saree' },
+    dependencies,
+  )
+
+  assert.equal(result.status, 'captured')
+  assert.deepEqual(calls.verification, [successfulPayment])
+  assert.equal(calls.failures.length, 0)
+  assert.equal(calls.dismissals.length, 0)
+})
+
+test('a failed attempt followed by dismissal reconciles the complete Razorpay order', async (t) => {
+  const originalWindow = globalThis.window
+  let checkoutOptions
+  let failureHandler
+  globalThis.window = {
+    Razorpay: class {
+      constructor(options) {
+        checkoutOptions = options
+      }
+
+      on(event, callback) {
+        if (event === 'payment.failed') failureHandler = callback
+      }
+
+      open() {
+        failureHandler({
+          error: {
+            metadata: {
+              order_id: order.razorpayOrderId,
+              payment_id: 'pay_failed_then_dismissed',
+            },
+          },
+        })
+        checkoutOptions.modal.ondismiss()
+      }
+    },
+  }
+  t.after(() => {
+    if (originalWindow === undefined) delete globalThis.window
+    else globalThis.window = originalWindow
+  })
+
+  const { dependencies, calls } = createDependencies()
+  calls.statuses.push(
+    { paymentStatus: 'pending' },
+    { paymentStatus: 'failed', inventoryStatus: 'released' },
+  )
+  dependencies.openCheckout = undefined
+
+  const result = await checkoutReservation(
+    { item, customer, productName: 'Test saree' },
+    dependencies,
+  )
+
+  assert.equal(result.status, 'failed')
+  assert.equal(result.inventoryStatus, 'released')
+  assert.equal(calls.failures.length, 1)
+  assert.deepEqual(calls.failures[0], {
+    reservationId: reservation.reservationId,
+    cancellationToken: reservation.cancellationToken,
+    razorpay_order_id: order.razorpayOrderId,
+  })
+  assert.equal(calls.verification.length, 0)
 })
 
 function createDependencies(overrides = {}) {
