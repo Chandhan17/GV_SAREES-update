@@ -300,7 +300,8 @@ export default function ImageZoom({ src, alt = 'Product image', onSwipe }) {
             transformOrigin: 'center center',
             willChange: 'transform',
           }}
-          loading="lazy"
+          loading="eager"
+          fetchPriority="high"
           onError={(event) => {
             event.currentTarget.onerror = null
             event.currentTarget.src = FALLBACK_IMAGE

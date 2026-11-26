@@ -2,8 +2,193 @@ import axios from 'axios'
 import FormData from 'form-data'
 import multer from 'multer'
 import sharp from 'sharp'
+import { Buffer } from 'node:buffer'
+import { Readable } from 'node:stream'
 
 const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024
+const MAX_MULTIPART_BODY_SIZE_BYTES = MAX_IMAGE_SIZE_BYTES + 64 * 1024
+const MULTIPART_BODY_READ_TIMEOUT_MS = 30_000
+
+function findPropertyDescriptor(target, property) {
+  let current = target
+  while (current) {
+    const descriptor = Object.getOwnPropertyDescriptor(current, property)
+    if (descriptor) return descriptor
+    current = Object.getPrototypeOf(current)
+  }
+  return null
+}
+
+function getBodyValueType(value) {
+  if (Buffer.isBuffer(value)) return 'buffer'
+  if (value instanceof Uint8Array) return 'uint8array'
+  if (typeof value === 'string') return 'string'
+  if (value === undefined) return 'undefined'
+  if (value === null) return 'null'
+  if (typeof value === 'object') return 'object'
+  return typeof value
+}
+
+function describeRequestBodyProperty(req, property) {
+  const descriptor = findPropertyDescriptor(req, property)
+  if (!descriptor) return { present: false, type: 'undefined' }
+  if (!Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+    return { present: true, type: 'accessor' }
+  }
+
+  const value = descriptor.value
+  const type = getBodyValueType(value)
+  const byteLength = Buffer.isBuffer(value) || value instanceof Uint8Array
+    ? value.byteLength
+    : typeof value === 'string'
+      ? Buffer.byteLength(value)
+      : undefined
+
+  return {
+    present: true,
+    type,
+    ...(byteLength === undefined ? {} : { byteLength }),
+  }
+}
+
+function getBufferedRawBody(req) {
+  for (const property of ['rawBody', 'body']) {
+    const descriptor = findPropertyDescriptor(req, property)
+    if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) continue
+
+    const value = descriptor.value
+    if (Buffer.isBuffer(value)) return value
+    if (value instanceof Uint8Array) return Buffer.from(value)
+  }
+  return null
+}
+
+function readRequestBody(req) {
+  const rawBody = getBufferedRawBody(req)
+  if (rawBody) {
+    if (rawBody.length > MAX_MULTIPART_BODY_SIZE_BYTES) {
+      return Promise.reject(Object.assign(new Error('Multipart request is too large.'), {
+        code: 'MULTIPART_BODY_TOO_LARGE',
+      }))
+    }
+    return Promise.resolve(rawBody)
+  }
+
+  const contentLength = Number(req.headers?.['content-length'])
+  if (Number.isFinite(contentLength) && contentLength > MAX_MULTIPART_BODY_SIZE_BYTES) {
+    return Promise.reject(Object.assign(new Error('Multipart request is too large.'), {
+      code: 'MULTIPART_BODY_TOO_LARGE',
+    }))
+  }
+
+  return new Promise((resolve, reject) => {
+    const chunks = []
+    let length = 0
+    let tooLarge = false
+    let settled = false
+
+    const cleanup = () => {
+      clearTimeout(timeout)
+      req.removeListener?.('data', onData)
+      req.removeListener?.('end', onEnd)
+      req.removeListener?.('error', onError)
+    }
+    const finish = (error, body) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      if (error) reject(error)
+      else resolve(body)
+    }
+    const onData = (chunk) => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      length += buffer.length
+      if (length > MAX_MULTIPART_BODY_SIZE_BYTES) {
+        tooLarge = true
+        chunks.length = 0
+        return
+      }
+      if (!tooLarge) chunks.push(buffer)
+    }
+    const onEnd = () => {
+      if (tooLarge) {
+        finish(Object.assign(new Error('Multipart request is too large.'), {
+          code: 'MULTIPART_BODY_TOO_LARGE',
+        }))
+        return
+      }
+      finish(null, Buffer.concat(chunks, length))
+    }
+    const onError = (error) => finish(error)
+    const timeout = setTimeout(() => {
+      finish(Object.assign(new Error('Original multipart request bytes are unavailable.'), {
+        code: 'MULTIPART_BODY_UNAVAILABLE',
+      }))
+    }, MULTIPART_BODY_READ_TIMEOUT_MS)
+
+    if (typeof req.on !== 'function') {
+      finish(Object.assign(new Error('Original multipart request bytes are unavailable.'), {
+        code: 'MULTIPART_BODY_UNAVAILABLE',
+      }))
+      return
+    }
+
+    req.on('data', onData)
+    req.on('end', onEnd)
+    req.on('error', onError)
+  })
+}
+
+function createMulterRequest(req, rawBody) {
+  // Vercel Dev replays data/end listeners but does not restore the request's pipeable stream.
+  const replay = Readable.from([rawBody], { objectMode: false })
+  replay.headers = req.headers
+  replay.method = req.method
+  replay.url = req.url
+  return replay
+}
+
+export function logUploadRequestDiagnostics(req, stage) {
+  if (process.env.NODE_ENV === 'production' && stage !== 'vercel route entry') return
+
+  // Inspect descriptors so diagnostics never invoke lazy body parsers.
+  const contentType = String(req.headers?.['content-type'] || '')
+
+  console.info('[telegram-upload] request', {
+    stage,
+    method: req.method || null,
+    contentType: contentType || null,
+    boundaryPresent: /(?:^|;)\s*boundary=(?:"[^"]+"|[^;\s]+)/i.test(contentType),
+    contentLength: req.headers?.['content-length'] || null,
+    body: describeRequestBodyProperty(req, 'body'),
+    rawBody: describeRequestBodyProperty(req, 'rawBody'),
+    streamReadable: Boolean(req.readable),
+    streamEnded: Boolean(req.readableEnded),
+    streamDestroyed: Boolean(req.destroyed),
+  })
+}
+
+function logUploadParserError(error, req) {
+  const contentType = String(req.headers?.['content-type'] || '')
+  console.error('[telegram-upload] multipart parser error', {
+    name: error?.name || 'Unknown',
+    code: error?.code || null,
+    message: isPerformanceTestMode()
+      ? 'Multipart parser failed.'
+      : error?.message || 'Unknown multipart parser error',
+    boundaryPresent: hasMultipartBoundary(contentType),
+    contentLength: req.headers?.['content-length'] || null,
+    body: describeRequestBodyProperty(req, 'body'),
+    rawBody: describeRequestBodyProperty(req, 'rawBody'),
+    streamReadable: Boolean(req.readable),
+    streamEnded: Boolean(req.readableEnded),
+    streamDestroyed: Boolean(req.destroyed),
+  })
+}
+
+function hasMultipartBoundary(contentType) {
+  return /(?:^|;)\s*boundary=(?:"[^"]+"|[^;\s]+)/i.test(contentType)
+}
 
 function sendJson(res, statusCode, payload) {
   res.statusCode = statusCode
@@ -37,6 +222,10 @@ function isDevelopmentEnv() {
   return process.env.NODE_ENV !== 'production'
 }
 
+function isPerformanceTestMode() {
+  return process.env.APP_MODE === 'performance' || process.env.TELEGRAM_TEST_MODE === '1'
+}
+
 function buildTelegramProxyUrl(fileId) {
   if (!fileId) return ''
 
@@ -68,28 +257,6 @@ function resolveTelegramReference(fileRef) {
   }
 
   return { type: 'file_id', value: decoded }
-}
-
-function getImageContentType(filePath, fallback = 'application/octet-stream') {
-  const extension = String(filePath || '')
-    .toLowerCase()
-    .split('.')
-    .pop()
-
-  const contentTypeByExtension = {
-    avif: 'image/avif',
-    bmp: 'image/bmp',
-    gif: 'image/gif',
-    jpeg: 'image/jpeg',
-    jpg: 'image/jpeg',
-    png: 'image/png',
-    svg: 'image/svg+xml',
-    webp: 'image/webp',
-    tif: 'image/tiff',
-    tiff: 'image/tiff',
-  }
-
-  return contentTypeByExtension[extension] || fallback
 }
 
 function getMimeTypeFromPath(path = '') {
@@ -214,14 +381,18 @@ function getSafeErrorDetails(error) {
 }
 
 async function optimizeImage(buffer) {
-  return sharp(buffer)
-    .resize({
-      width: 1200,
-      fit: 'inside',
-      withoutEnlargement: true,
-    })
-    .webp({ quality: 80 })
-    .toBuffer()
+  try {
+    return await sharp(buffer)
+      .resize({
+        width: 1200,
+        fit: 'inside',
+        withoutEnlargement: true,
+      })
+      .webp({ quality: 80 })
+      .toBuffer()
+  } catch {
+    throw Object.assign(new Error('Uploaded file is not a valid image.'), { code: 'INVALID_IMAGE' })
+  }
 }
 
 async function uploadImageToTelegram({ buffer, telegramToken, telegramChannelId }) {
@@ -325,7 +496,11 @@ async function getTelegramFileMeta({ telegramToken, fileId }) {
   // Log response status and filePath (production-safe, no token)
   try {
     console.log('getTelegramFileMeta', { status: telegramResponse.status, filePath })
-  } catch (e) {}
+  } catch (error) {
+    if (error?.code !== 'EPIPE') {
+      process.emitWarning('Telegram file metadata logging failed.')
+    }
+  }
 
   return {
     file_path: filePath,
@@ -358,7 +533,11 @@ async function fetchTelegramFileStream({ telegramToken, decodedFileId }) {
 
   try {
     console.log('fetchTelegramFileStream', { filePath, status: imageResponse.status })
-  } catch (e) {}
+  } catch (error) {
+    if (error?.code !== 'EPIPE') {
+      process.emitWarning('Telegram file stream logging failed.')
+    }
+  }
 
   return {
     imageResponse,
@@ -389,10 +568,16 @@ function getQueryFileId(req) {
   }
 }
 
-export function createTelegramImageHandler({ telegramToken, telegramChannelId }) {
+export function createTelegramImageHandler({
+  telegramToken,
+  telegramChannelId,
+  uploadImage = uploadImageToTelegram,
+}) {
   const upload = createUploadMiddleware()
 
   return async function telegramImageHandler(req, res) {
+    logUploadRequestDiagnostics(req, 'multer input')
+
     if (req.method !== 'POST') {
       res.setHeader('Allow', 'POST')
       return sendJson(res, 405, { error: 'Method Not Allowed' })
@@ -404,19 +589,50 @@ export function createTelegramImageHandler({ telegramToken, telegramChannelId })
       })
     }
 
-    try {
-      await runMiddleware(req, res, upload)
+    const contentType = String(req.headers?.['content-type'] || '')
+    if (!/^multipart\/form-data(?:\s*;|$)/i.test(contentType)) {
+      return sendJson(res, 415, { error: 'Expected a multipart/form-data image upload.' })
+    }
+    if (!hasMultipartBoundary(contentType)) {
+      return sendJson(res, 400, {
+        error: 'Multipart boundary is missing. Do not set Content-Type manually when sending FormData.',
+      })
+    }
 
-      if (!req.file) {
+    try {
+      const requestBody = await readRequestBody(req)
+      const multipartRequest = createMulterRequest(req, requestBody)
+      try {
+        await runMiddleware(multipartRequest, res, upload)
+      } catch (error) {
+        logUploadParserError(error, req)
+        throw error
+      }
+
+      logUploadRequestDiagnostics(multipartRequest, 'multer parsed')
+      if (process.env.NODE_ENV !== 'production') {
+        console.info('[telegram-upload] parsed file', {
+          imageFieldReceived: Boolean(multipartRequest.file),
+          fieldName: multipartRequest.file?.fieldname || null,
+          fileSize: multipartRequest.file?.size ?? null,
+          mimeType: multipartRequest.file?.mimetype || null,
+        })
+      }
+
+      if (!multipartRequest.file) {
         return sendJson(res, 400, { error: 'An image file is required.' })
       }
 
-      if (!req.file.mimetype?.startsWith('image/')) {
+      if (!multipartRequest.file.size) {
+        return sendJson(res, 400, { error: 'Image file is empty.' })
+      }
+
+      if (!multipartRequest.file.mimetype?.startsWith('image/')) {
         return sendJson(res, 400, { error: 'Only image files are allowed.' })
       }
 
-      const result = await uploadImageToTelegram({
-        buffer: req.file.buffer,
+      const result = await uploadImage({
+        buffer: multipartRequest.file.buffer,
         telegramToken,
         telegramChannelId,
       })
@@ -427,15 +643,34 @@ export function createTelegramImageHandler({ telegramToken, telegramChannelId })
         if (error.code === 'LIMIT_FILE_SIZE') {
           return sendJson(res, 413, { error: 'Image must be 5MB or smaller.' })
         }
+        if (error.code === 'LIMIT_UNEXPECTED_FILE') {
+          return sendJson(res, 400, { error: 'Unexpected upload field; expected "image".' })
+        }
 
         return sendJson(res, 400, { error: 'Invalid image upload.' })
       }
 
-      if (error?.message === 'Only image files are allowed.') {
+      if (error?.code === 'MULTIPART_BODY_TOO_LARGE') {
+        return sendJson(res, 413, { error: 'Multipart request is too large.' })
+      }
+
+      if (error?.code === 'MULTIPART_BODY_UNAVAILABLE') {
         return sendJson(res, 400, { error: error.message })
       }
 
-      return sendJson(res, 500, {
+      if (error?.code === 'INVALID_IMAGE') {
+        return sendJson(res, 400, { error: error.message })
+      }
+
+      if (['Only image files are allowed.', 'Only JPEG, PNG or WEBP images are allowed.'].includes(error?.message)) {
+        return sendJson(res, 400, { error: error.message })
+      }
+
+      if (['Unexpected end of form', 'Unexpected end of file', 'Malformed part header', 'Multipart: Boundary not found'].includes(error?.message)) {
+        return sendJson(res, 400, { error: 'Malformed multipart upload.' })
+      }
+
+      return sendJson(res, axios.isAxiosError(error) ? 502 : 500, {
         error: getTelegramErrorMessage(error, 'Unable to upload image to Telegram.'),
       })
     }
@@ -481,8 +716,10 @@ export function createTelegramImageProxyHandler({ telegramToken }) {
       // Production-safe logging for proxy action (no token printed)
       try {
         console.log('Proxying Telegram file', { filePath, referenceType: reference.type, proxiedStatus: imageResponse.status })
-      } catch (e) {
-        // ignore
+      } catch (error) {
+        if (error?.code !== 'EPIPE') {
+          process.emitWarning('Telegram image proxy logging failed.')
+        }
       }
 
       const contentType = imageResponse.headers['content-type']
@@ -517,7 +754,11 @@ export function createTelegramImageProxyHandler({ telegramToken }) {
       })
 
       imageResponse.data.on('error', (streamError) => {
-        console.error('Image stream error:', streamError)
+        if (isPerformanceTestMode()) {
+          console.error('Telegram test image stream failed.')
+        } else {
+          console.error('Image stream error:', streamError)
+        }
 
         if (!res.headersSent) {
           sendJson(res, 500, {
@@ -531,7 +772,9 @@ export function createTelegramImageProxyHandler({ telegramToken }) {
 
       imageResponse.data.pipe(res)
     } catch (error) {
-      const errorDetails = getSafeErrorDetails(error)
+      const errorDetails = isPerformanceTestMode()
+        ? { status: Number(error?.statusCode) || Number(error?.response?.status) || 500 }
+        : getSafeErrorDetails(error)
       console.error('Telegram image proxy error:', errorDetails)
 
       if (res.headersSent) {
@@ -540,6 +783,9 @@ export function createTelegramImageProxyHandler({ telegramToken }) {
       }
 
       const statusCode = Number(error?.statusCode) || Number(error?.response?.status) || 500
+      if (isPerformanceTestMode()) {
+        return sendError(res, statusCode, 'Unable to fetch image from the Telegram test channel.')
+      }
       const message =
         statusCode === 404
           ? 'Telegram file path not found'

@@ -7,12 +7,16 @@ import AdminLayout from './components/AdminLayout'
 import clientConfig from './config/clientConfig'
 import AdminLoginPage from './pages/AdminLoginPage'
 import HomePage from './pages/HomePage'
+import useScrollManager from './hooks/useScrollManager'
 import NotFoundPage from './pages/NotFoundPage'
-import ProductDetailsPage from './pages/ProductDetailsPage'
-import ProductsPage from './pages/ProductsPage'
 
+const CartPage = lazy(() => import('./pages/CartPage'))
+const ProductDetailsPage = lazy(() => import('./pages/ProductDetailsPage'))
+const ProductsPage = lazy(() => import('./pages/ProductsPage'))
 const AdminDashboardPage = lazy(() => import('./pages/AdminDashboardPage'))
 const AdminOrdersPage = lazy(() => import('./pages/AdminOrders'))
+const CustomerReservationsPage = lazy(() => import('./pages/CustomerReservationsPage'))
+const AdminStoreSettingsPage = lazy(() => import('./pages/AdminStoreSettingsPage'))
 
 function StoreLayout({ children }) {
   return (
@@ -21,6 +25,16 @@ function StoreLayout({ children }) {
       <main>{children}</main>
       <Footer />
     </div>
+  )
+}
+
+function CustomerRoute({ children }) {
+  return (
+    <StoreLayout>
+      <Suspense fallback={<div role="status" className="p-10 text-center text-brand-dusty">Loading page...</div>}>
+        {children}
+      </Suspense>
+    </StoreLayout>
   )
 }
 
@@ -36,6 +50,8 @@ function hexToRgbTriplet(hex) {
 }
 
 function App() {
+  useScrollManager()
+
   useEffect(() => {
     const softWhite = hexToRgbTriplet(clientConfig.theme.softWhite)
     const lightBlush = hexToRgbTriplet(clientConfig.theme.lightBlush)
@@ -82,20 +98,27 @@ function App() {
       />
       <Route
         path="/products"
-        element={
-          <StoreLayout>
-            <ProductsPage />
-          </StoreLayout>
-        }
+        element={<CustomerRoute><ProductsPage /></CustomerRoute>}
       />
       <Route
         path="/products/:id"
+        element={<CustomerRoute><ProductDetailsPage /></CustomerRoute>}
+      />
+      <Route
+        path="/cart"
+        element={<CustomerRoute><CartPage /></CustomerRoute>}
+      />
+      <Route
+        path="/orders"
         element={
           <StoreLayout>
-            <ProductDetailsPage />
+            <Suspense fallback={<div className="p-10 text-center text-brand-dusty">Loading orders...</div>}>
+              <CustomerReservationsPage />
+            </Suspense>
           </StoreLayout>
         }
       />
+      <Route path="/reservations" element={<Navigate to="/orders" replace />} />
       <Route path="/admin/login" element={<AdminLoginPage />} />
       <Route path="/login" element={<AdminLoginPage />} />
       <Route
@@ -117,6 +140,18 @@ function App() {
             <AdminLayout>
               <Suspense fallback={<div className="p-10 text-center text-brand-dusty">Loading orders...</div>}>
                 <AdminOrdersPage />
+              </Suspense>
+            </AdminLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/admin/settings"
+        element={
+          <ProtectedRoute>
+            <AdminLayout>
+              <Suspense fallback={<div className="p-10 text-center text-brand-dusty">Loading settings...</div>}>
+                <AdminStoreSettingsPage />
               </Suspense>
             </AdminLayout>
           </ProtectedRoute>

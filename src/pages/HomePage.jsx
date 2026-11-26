@@ -1,13 +1,16 @@
 import { ArrowRight } from 'lucide-react'
-import { useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { useMemo } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
 import HeroBanner from '../components/HeroBanner'
 import LoadingSkeleton from '../components/LoadingSkeleton'
 import ProductGrid from '../components/ProductGrid'
-import QuickShopModal from '../components/QuickShopModal'
 import SectionReveal from '../components/SectionReveal'
 import { useProducts } from '../hooks/useProducts'
+import { useBestSellers } from '../hooks/useBestSellers'
+import { useCart } from '../hooks/useCart'
+import { useToast } from '../hooks/useToast'
 import { getPrimaryImageUrl } from '../utils/imageHelpers'
+import { selectAvailableBestSellers, shouldShowBestSellers } from '../utils/bestSellers'
 import clientConfig from '../config/clientConfig'
 
 const collectionDefinitions = [
@@ -84,7 +87,29 @@ function PriceTile({ range }) {
 
 export default function HomePage() {
   const { products, loading } = useProducts()
-  const [selectedProduct, setSelectedProduct] = useState(null)
+  const { productIds: bestSellerIds, loading: bestSellersLoading, error: bestSellersError, reload: reloadBestSellers } = useBestSellers()
+  const navigate = useNavigate()
+  const { addToCart, startBuyNow } = useCart()
+  const { success, error } = useToast()
+
+  const handleAddToCart = (product) => {
+    try {
+      addToCart(product)
+      success(`${product.name} added to cart.`)
+    } catch (err) {
+      error(err?.message || 'Unable to add this product to the cart.')
+    }
+  }
+
+  const handleBuyNow = (product) => {
+    try {
+      startBuyNow(product, 1)
+      navigate('/cart?mode=buy-now')
+    } catch (err) {
+      error(err?.message || 'Unable to start checkout for this product.')
+      throw err
+    }
+  }
 
   const collectionImages = useMemo(() => {
     const usedProductIds = new Set()
@@ -119,6 +144,16 @@ export default function HomePage() {
     })
   }, [products])
   const newArrivals = products.slice(0, 4)
+  const bestSellerProducts = useMemo(
+    () => selectAvailableBestSellers(bestSellerIds, products),
+    [bestSellerIds, products],
+  )
+  const showBestSellers = shouldShowBestSellers({
+    productsLoading: loading,
+    bestSellersLoading,
+    error: bestSellersError,
+    productCount: bestSellerProducts.length,
+  })
 
   return (
     <div>
@@ -146,6 +181,41 @@ export default function HomePage() {
           </section>
         </SectionReveal>
 
+        {showBestSellers && (
+          <SectionReveal delay={0.05}>
+            <section className="mt-16" aria-labelledby="best-sellers-title">
+              <div className="mb-8 flex items-end justify-between gap-4">
+                <div>
+                  <p className="section-kicker">Loved by our customers</p>
+                  <h2 id="best-sellers-title" className="section-title text-3xl md:text-4xl">Best Sellers</h2>
+                </div>
+                {!bestSellersLoading && !bestSellersError && bestSellerProducts.length > 0 && (
+                  <Link to="/products?sort=best-selling" className="inline-flex items-center gap-2 text-sm font-semibold text-brand-dusty hover:text-brand-rose-gold">
+                    View all best sellers <ArrowRight size={16} />
+                  </Link>
+                )}
+              </div>
+              {loading || bestSellersLoading ? (
+                <LoadingSkeleton />
+              ) : bestSellersError ? (
+                <div className="rounded-xl border border-brand-pale-rose/30 bg-brand-card-white px-6 py-8 text-center">
+                  <p className="text-sm text-brand-dusty">{bestSellersError}</p>
+                  <button type="button" onClick={reloadBestSellers} className="btn-outline mt-4">
+                    Try again
+                  </button>
+                </div>
+              ) : (
+                <ProductGrid
+                  products={bestSellerProducts}
+                  onBuyNow={handleBuyNow}
+                  onAddToCart={handleAddToCart}
+                  columns={6}
+                />
+              )}
+            </section>
+          </SectionReveal>
+        )}
+
         <SectionReveal delay={0.05}>
           <section className="-mx-4 mt-16 bg-brand-blush px-4 py-12 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
             <div className="mb-8">
@@ -169,7 +239,7 @@ export default function HomePage() {
                 View all <ArrowRight size={16} />
               </Link>
             </div>
-            {loading ? <LoadingSkeleton /> : newArrivals.length ? <ProductGrid products={newArrivals} onQuickShop={setSelectedProduct} /> : <EmptyProductState />}
+            {loading ? <LoadingSkeleton /> : newArrivals.length ? <ProductGrid products={newArrivals} onBuyNow={handleBuyNow} onAddToCart={handleAddToCart} /> : <EmptyProductState />}
           </section>
         </SectionReveal>
 
@@ -185,7 +255,6 @@ export default function HomePage() {
         </SectionReveal>
       </div>
 
-      <QuickShopModal product={selectedProduct} isOpen={Boolean(selectedProduct)} onClose={() => setSelectedProduct(null)} />
     </div>
   )
 }

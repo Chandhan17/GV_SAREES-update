@@ -1,9 +1,12 @@
-import { ArrowUpRight } from 'lucide-react'
+import { ArrowUpRight, ShoppingCart } from 'lucide-react'
+import { useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { formatINR } from '../utils/formatters'
 import { FALLBACK_IMAGE, getPrimaryImageUrl } from '../utils/imageHelpers'
 
-export default function ProductCard({ product, onQuickShop }) {
+export default function ProductCard({ product, onBuyNow, onAddToCart, priority = false }) {
+  const [isBuyNowProcessing, setIsBuyNowProcessing] = useState(false)
+  const buyNowLockRef = useRef(false)
   const primaryImage = getPrimaryImageUrl(
     product.images,
     FALLBACK_IMAGE
@@ -13,6 +16,18 @@ export default function ProductCard({ product, onQuickShop }) {
   const hasDiscount = originalPrice > sellingPrice
   const discountPercent = hasDiscount ? Math.round(((originalPrice - sellingPrice) / originalPrice) * 100) : 0
 
+  const handleBuyNow = async () => {
+    if (buyNowLockRef.current || !onBuyNow) return
+    buyNowLockRef.current = true
+    setIsBuyNowProcessing(true)
+    try {
+      await onBuyNow(product)
+    } catch {
+      buyNowLockRef.current = false
+      setIsBuyNowProcessing(false)
+    }
+  }
+
   return (
     <article className="group overflow-hidden rounded-2xl border border-brand-pale-rose bg-brand-white">
       <Link to={`/products/${product.id}`} className="relative block overflow-hidden">
@@ -21,7 +36,8 @@ export default function ProductCard({ product, onQuickShop }) {
             src={primaryImage}
             alt={product.name}
             className="h-full w-full object-cover transition duration-700 ease-out group-hover:scale-105"
-            loading="lazy"
+            loading={priority ? 'eager' : 'lazy'}
+            fetchPriority={priority ? 'high' : 'auto'}
             onError={(event) => {
               event.currentTarget.onerror = null
               event.currentTarget.src = FALLBACK_IMAGE
@@ -58,11 +74,20 @@ export default function ProductCard({ product, onQuickShop }) {
         </div>
         <button
           type="button"
-          onClick={() => onQuickShop(product)}
+          onClick={() => onAddToCart?.(product)}
           disabled={product.availableStock <= 0}
-          className="mt-4 text-xs font-bold uppercase tracking-[0.18em] text-brand-dusty underline decoration-brand-rose-gold decoration-2 underline-offset-4 transition hover:text-brand-rose-gold disabled:cursor-not-allowed disabled:opacity-50"
+          className="btn-outline mt-4 w-full !px-3 !py-2 text-xs disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {product.availableStock <= 0 ? 'Out of stock' : `${product.availableStock} available · Enquire`}
+          <ShoppingCart size={15} /> Add to cart
+        </button>
+        <button
+          type="button"
+          onClick={handleBuyNow}
+          disabled={product.availableStock <= 0 || isBuyNowProcessing}
+          aria-busy={isBuyNowProcessing}
+          className="mt-3 w-full text-xs font-bold uppercase tracking-[0.18em] text-brand-dusty underline decoration-brand-rose-gold decoration-2 underline-offset-4 transition hover:text-brand-rose-gold disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {product.availableStock <= 0 ? 'Out of stock' : isBuyNowProcessing ? 'Preparing checkout…' : 'Buy now'}
         </button>
       </div>
     </article>

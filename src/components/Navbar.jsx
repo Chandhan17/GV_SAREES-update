@@ -1,7 +1,9 @@
-import { ChevronDown, Menu, Search, ShoppingBag, X } from 'lucide-react'
-import { useState } from 'react'
-import { Link, NavLink } from 'react-router-dom'
+import { ChevronDown, Menu, Search, ShoppingCart, X } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Link, NavLink, useNavigate } from 'react-router-dom'
 import clientConfig from '../config/clientConfig'
+import { useCart } from '../hooks/useCart'
+import BrandLogo from './BrandLogo'
 
 function NavigationItem({ item, onNavigate }) {
   const [open, setOpen] = useState(false)
@@ -52,10 +54,37 @@ function NavigationItem({ item, onNavigate }) {
 export default function Navbar() {
   const [menuOpen, setMenuOpen] = useState(false)
   const [mobileSareesOpen, setMobileSareesOpen] = useState(false)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const searchInputRef = useRef(null)
+  const navigate = useNavigate()
+  const { itemCount } = useCart()
+
+  useEffect(() => {
+    if (searchOpen) searchInputRef.current?.focus()
+  }, [searchOpen])
 
   const closeMenu = () => {
     setMenuOpen(false)
     setMobileSareesOpen(false)
+    setSearchOpen(false)
+  }
+
+  const handleSearchSubmit = (event) => {
+    event.preventDefault()
+    const query = searchQuery.trim()
+    navigate(query ? `/products?search=${encodeURIComponent(query)}` : '/products')
+    setSearchOpen(false)
+    setSearchQuery('')
+    closeMenu()
+  }
+
+  const handleSearchKeyDown = (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      setSearchOpen(false)
+      setSearchQuery('')
+    }
   }
 
   return (
@@ -66,7 +95,7 @@ export default function Navbar() {
 
       <div className="mx-auto flex max-w-[1440px] items-center justify-between gap-5 px-4 py-4 lg:px-8">
         <Link to="/" className="flex shrink-0 items-center gap-2.5" onClick={closeMenu}>
-          <img src="/logo.png" alt="GV Sarees Logo" className="-my-2 h-14 w-14 object-contain" />
+          <BrandLogo alt="GV Sarees Logo" className="-my-2 h-14 w-14 shrink-0" />
           <span className="font-display text-2xl leading-none text-brand-burgundy">{clientConfig.brandName}</span>
         </Link>
 
@@ -77,11 +106,24 @@ export default function Navbar() {
         </nav>
 
         <div className="flex shrink-0 items-center gap-1">
-          <Link to="/products" className="rounded-full p-2.5 text-brand-burgundy transition hover:bg-brand-soft-white" aria-label="Search products">
-            <Search size={19} strokeWidth={1.8} />
-          </Link>
-          <Link to="/products" className="rounded-full p-2.5 text-brand-burgundy transition hover:bg-brand-soft-white" aria-label="Open shopping catalogue">
-            <ShoppingBag size={19} strokeWidth={1.8} />
+          <button
+            type="button"
+            className="rounded-full p-2.5 text-brand-burgundy transition hover:bg-brand-soft-white"
+            aria-label={searchOpen ? 'Close product search' : 'Open product search'}
+            aria-expanded={searchOpen}
+            aria-controls="navbar-product-search"
+            onClick={() => {
+              setMenuOpen(false)
+              setSearchOpen((open) => !open)
+            }}
+          >
+            {searchOpen ? <X size={19} strokeWidth={1.8} /> : <Search size={19} strokeWidth={1.8} />}
+          </button>
+          <Link to="/cart" className="relative rounded-full p-2.5 text-brand-burgundy transition hover:bg-brand-soft-white" aria-label={`Open shopping cart, ${itemCount} item(s)`}>
+            <ShoppingCart size={19} strokeWidth={1.8} />
+            <span className="absolute -right-0.5 -top-0.5 flex min-h-4 min-w-4 items-center justify-center rounded-full bg-brand-dusty px-1 text-[0.6rem] font-bold leading-none text-brand-soft-white">
+              {itemCount > 99 ? '99+' : itemCount}
+            </span>
           </Link>
           <button
             type="button"
@@ -94,6 +136,42 @@ export default function Navbar() {
           </button>
         </div>
       </div>
+
+      {searchOpen && (
+        <form
+          id="navbar-product-search"
+          role="search"
+          onSubmit={handleSearchSubmit}
+          className="mx-auto flex max-w-[1440px] items-center gap-2 px-4 pb-4 sm:px-6 lg:px-8"
+        >
+          <label htmlFor="navbar-search-input" className="sr-only">Search products</label>
+          <input
+            ref={searchInputRef}
+            id="navbar-search-input"
+            type="search"
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            onKeyDown={handleSearchKeyDown}
+            placeholder="Search sarees, collections..."
+            className="input-field mt-0 min-w-0 flex-1 bg-brand-soft-white"
+          />
+          <button type="submit" className="btn-gold shrink-0 !px-4" aria-label="Submit product search">
+            <Search size={17} />
+            <span className="hidden sm:inline">Search</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setSearchOpen(false)
+              setSearchQuery('')
+            }}
+            className="rounded-full p-2.5 text-brand-burgundy transition hover:bg-brand-soft-white"
+            aria-label="Close search"
+          >
+            <X size={19} />
+          </button>
+        </form>
+      )}
 
       {menuOpen && (
         <div className="border-t border-brand-pale-rose/60 bg-brand-blush px-4 py-4 xl:hidden">

@@ -2,11 +2,11 @@ export const clientConfig = {
   brandName: 'GV Sarees',
   tagline: 'A considered edit of sarees for everyday elegance and celebrations.',
   phone: '',
-  whatsapp: '',
   email: '',
   address: '',
   instagram: '',
-  logo: '/logo.png',
+  logo: '/logo-112.png',
+  logoFallback: '/logo.png',
   announcement: 'Discover thoughtfully chosen sarees for every celebration.',
   content: {
     heroEyebrow: 'The GV Sarees edit',
@@ -21,6 +21,7 @@ export const clientConfig = {
   navigation: [
     { label: 'Home', to: '/' },
     { label: 'Shop All', to: '/products' },
+    { label: 'My Orders', to: '/orders' },
     {
       label: 'Sarees',
       to: '/products?search=saree',

@@ -1,20 +1,53 @@
-import { ArrowLeft, ArrowRight, Check, MessageCircle } from 'lucide-react'
-import { useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { ArrowLeft, ArrowRight, Check } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import ImageGallery from '../components/ImageGallery'
-import QuickShopModal from '../components/QuickShopModal'
 import { fetchProductById } from '../services/productService'
 import { formatINR } from '../utils/formatters'
 import { getImageUrl } from '../utils/imageHelpers'
+import { useCart } from '../hooks/useCart'
+import { useToast } from '../hooks/useToast'
 
 export default function ProductDetailsPage() {
   const { id } = useParams()
   const [product, setProduct] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [quickOpen, setQuickOpen] = useState(false)
+  const [quantity, setQuantity] = useState(1)
+  const [buyNowProcessing, setBuyNowProcessing] = useState(false)
+  const buyNowLockRef = useRef(false)
+  const { addToCart, startBuyNow } = useCart()
+  const navigate = useNavigate()
+  const { success, error: toastError } = useToast()
+
+  const handleAddToCart = () => {
+    try {
+      addToCart(product, quantity)
+      success(`${product.name} added to cart.`)
+    } catch (err) {
+      toastError(err?.message || 'Unable to add this product to the cart.')
+    }
+  }
+
+  const handleBuyNow = () => {
+    if (buyNowLockRef.current || !product) return
+    buyNowLockRef.current = true
+    setBuyNowProcessing(true)
+    try {
+      startBuyNow(product, quantity)
+      navigate('/cart?mode=buy-now')
+    } catch (err) {
+      buyNowLockRef.current = false
+      setBuyNowProcessing(false)
+      toastError(err?.message || 'Unable to start checkout for this product.')
+    }
+  }
 
   useEffect(() => {
+    setQuantity(1)
+    setBuyNowProcessing(false)
+    buyNowLockRef.current = false
+
     async function loadProduct() {
       try {
         setLoading(true)
@@ -97,13 +130,49 @@ export default function ProductDetailsPage() {
             <p className="mt-5 rounded-xl bg-brand-blush px-4 py-3 text-sm font-semibold text-brand-dusty">Out of stock. Please check back later.</p>
           ) : (
             <div className="mt-5 flex items-center gap-2 text-sm text-brand-dusty">
-              <Check size={17} className="text-brand-rose-gold" /> {product.availableStock} available · held for 30 minutes after reservation
+              <Check size={17} className="text-brand-rose-gold" /> {product.availableStock} available · stock is held securely when you begin payment
             </div>
           )}
 
-          <button type="button" className="btn-gold mt-5 w-full shadow-soft" onClick={() => setQuickOpen(true)} disabled={product.availableStock <= 0}>
-            <MessageCircle size={17} /> {product.availableStock <= 0 ? 'Currently unavailable' : 'Reserve & enquire on WhatsApp'}
-          </button>
+          <div className="mt-5 flex items-center justify-between gap-4">
+            <span className="text-sm font-semibold text-brand-dusty">Quantity</span>
+            <div className="flex items-center rounded-full border border-brand-pale-rose/70 bg-brand-card-white">
+              <button
+                type="button"
+                onClick={() => setQuantity((current) => Math.max(1, current - 1))}
+                disabled={quantity <= 1 || product.availableStock <= 0}
+                aria-label="Decrease quantity"
+                className="rounded-l-full px-4 py-2 text-brand-burgundy transition hover:bg-brand-blush disabled:opacity-40"
+              >
+                −
+              </button>
+              <span className="min-w-10 text-center text-sm font-semibold text-brand-burgundy" aria-live="polite">{quantity}</span>
+              <button
+                type="button"
+                onClick={() => setQuantity((current) => Math.min(product.availableStock, current + 1))}
+                disabled={quantity >= product.availableStock}
+                aria-label="Increase quantity"
+                className="rounded-r-full px-4 py-2 text-brand-burgundy transition hover:bg-brand-blush disabled:opacity-40"
+              >
+                +
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-5 grid gap-3 sm:grid-cols-2">
+            <button type="button" className="btn-gold w-full shadow-soft" onClick={handleAddToCart} disabled={product.availableStock <= 0}>
+              {product.availableStock <= 0 ? 'Out of stock' : 'Add to cart'}
+            </button>
+            <button
+              type="button"
+              className="btn-outline w-full"
+              onClick={handleBuyNow}
+              disabled={product.availableStock <= 0 || buyNowProcessing}
+              aria-busy={buyNowProcessing}
+            >
+              {product.availableStock <= 0 ? 'Out of stock' : buyNowProcessing ? 'Preparing checkout…' : 'Buy now'}
+            </button>
+          </div>
 
           {details.length > 0 && (
             <dl className="mt-6 grid gap-4 border-y border-brand-pale-rose/10 py-5 sm:grid-cols-2">
@@ -141,7 +210,6 @@ export default function ProductDetailsPage() {
         </section>
       </div>
 
-      <QuickShopModal product={product} isOpen={quickOpen} onClose={() => setQuickOpen(false)} />
     </div>
   )
 }

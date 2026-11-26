@@ -9,13 +9,22 @@ export function normalizeCustomer(customer = {}) {
   }
 }
 
-export function reservationFingerprint({ productId, quantity, selectedSize, customer }) {
-  const canonical = JSON.stringify({
-    productId: String(productId),
-    quantity,
-    selectedSize: String(selectedSize || '').trim(),
-    customer: normalizeCustomer(customer),
-  })
+export function reservationFingerprint({ productId, quantity, selectedSize, items, customer }) {
+  const canonical = items
+    ? JSON.stringify({
+      items: items.map((item) => ({
+        productId: String(item.productId),
+        quantity: item.quantity,
+        selectedSize: String(item.selectedSize || '').trim(),
+      })),
+      customer: normalizeCustomer(customer),
+    })
+    : JSON.stringify({
+      productId: String(productId),
+      quantity,
+      selectedSize: String(selectedSize || '').trim(),
+      customer: normalizeCustomer(customer),
+    })
   return createHash('sha256').update(canonical).digest('hex')
 }
 

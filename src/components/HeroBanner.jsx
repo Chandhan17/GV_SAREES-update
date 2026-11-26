@@ -7,15 +7,39 @@ import { FALLBACK_IMAGE } from '../utils/imageHelpers'
 export default function HeroBanner() {
   return (
     <section className="relative h-[320px] overflow-hidden bg-brand-blush sm:aspect-[1672/941] sm:h-auto">
-      <img
-        src={clientConfig.heroImages[0]}
-        alt="GV Sarees collection"
-        className="absolute inset-0 h-full w-full object-cover object-[70%_center] sm:object-contain sm:object-center"
-        onError={(event) => {
-          event.currentTarget.onerror = null
-          event.currentTarget.src = FALLBACK_IMAGE
-        }}
-      />
+      <picture className="absolute inset-0 block">
+        <source
+          type="image/avif"
+          srcSet="/Banner-480.avif 480w, /Banner-960.avif 960w, /Banner-1200.avif 1200w, /Banner-1672.avif 1672w"
+          sizes="100vw"
+        />
+        <source
+          type="image/webp"
+          srcSet="/Banner-480.webp 480w, /Banner-960.webp 960w, /Banner-1200.webp 1200w, /Banner-1672.webp 1672w"
+          sizes="100vw"
+        />
+        <img
+          src={clientConfig.heroImages[0]}
+          alt="GV Sarees collection"
+          width={1672}
+          height={941}
+          loading="eager"
+          fetchPriority="high"
+          decoding="async"
+          className="absolute inset-0 h-full w-full object-cover object-[70%_center] sm:object-contain sm:object-center"
+          onError={(event) => {
+            const image = event.currentTarget
+            const sources = image.parentElement?.querySelectorAll('source')
+            if (sources?.length) {
+              sources.forEach((source) => source.remove())
+              image.src = clientConfig.heroImages[0]
+              return
+            }
+            image.onerror = null
+            image.src = FALLBACK_IMAGE
+          }}
+        />
+      </picture>
       <div className="absolute inset-0 z-0 bg-gradient-to-l from-brand-burgundy/75 via-brand-burgundy/25 to-transparent sm:bg-gradient-to-r sm:from-brand-burgundy/75 sm:via-brand-burgundy/30 sm:to-transparent" />
       <Motion.div
         initial={{ opacity: 0, y: 18 }}

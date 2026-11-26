@@ -3,9 +3,18 @@ import { sendError, setSecurityHeaders } from '../../server/http.js'
 import { db } from '../../server/reservationService.js'
 import { FieldValue, Timestamp } from 'firebase-admin/firestore'
 import { createHash } from 'node:crypto'
+import { performance } from 'node:perf_hooks'
 import { z } from 'zod'
 import { normalizeImageUrl, normalizeImages } from '../../src/utils/imageHelpers.js'
 import { productCreateSchema, productUpdateSchema } from '../../server/validation.js'
+
+function logProductUpdateTiming(operation, startedAt, outcome) {
+  console.info('[admin-product-update-timing]', {
+    operation,
+    elapsedMs: Number((performance.now() - startedAt).toFixed(2)),
+    outcome,
+  })
+}
 
 const deleteSchema = z.object({
   action: z.literal('delete'),
@@ -165,6 +174,7 @@ export function createAdminProductsHandler({
       updates.sizeChartImage = normalizeImageUrl(updates.sizeChartImage)
     }
 
+    const firestoreStartedAt = performance.now()
     try {
       await firestore.runTransaction(async (transaction) => {
         const productRef = firestore.collection('products').doc(parse.data.productId)
@@ -174,8 +184,10 @@ export function createAdminProductsHandler({
         }
         transaction.update(productRef, updates)
       })
+      logProductUpdateTiming('product-firestore-update', firestoreStartedAt, 'success')
       return res.status(200).json({ success: true, productId: parse.data.productId })
     } catch (error) {
+      logProductUpdateTiming('product-firestore-update', firestoreStartedAt, 'failure')
       if (error?.code === 'PRODUCT_NOT_FOUND') {
         return sendError(res, 404, error.message)
       }
@@ -200,8 +212,13 @@ export function createAdminProductsHandler({
     })
     return res.status(200).json({ success: true, images })
   } catch (error) {
-    const status = ['PRODUCT_NOT_FOUND', 'ACTIVE_RESERVATIONS'].includes(error?.code) ? 409 : 500
-    return sendError(res, status, error?.message || 'Unable to delete product.')
+    if (error?.code === 'PRODUCT_NOT_FOUND') {
+      return sendError(res, 404, error.message)
+    }
+    if (error?.code === 'ACTIVE_RESERVATIONS') {
+      return sendError(res, 409, error.message)
+    }
+    return sendError(res, 500, 'Unable to delete product.')
   }
 }
 }

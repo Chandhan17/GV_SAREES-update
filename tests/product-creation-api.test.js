@@ -380,3 +380,18 @@ test('browser createProduct sends bearer and idempotency headers and no addDoc',
   assert.match(page, /generateProductCreationKey/)
   assert.match(page, /createProduct\([\s\S]*generateProductCreationKey/)
 })
+
+test('admin product form resets on Add route entry and reinitializes for each edited product', () => {
+  const page = readFileSync(new URL('../src/pages/AdminDashboardPage.jsx', import.meta.url), 'utf8')
+  assert.match(page, /const initializeForm = useCallback\(\(product = null\)/)
+  assert.match(page, /useLayoutEffect\(\(\) => \{\s*if \(isAddProduct\) resetForm\(\)\s*\}, \[isAddProduct, resetForm\]\)/)
+  assert.match(page, /const handleEdit = \(product\) => initializeForm\(product\)/)
+  assert.match(page, /setForm\(\{\s*\.\.\.initialForm\s*\}\)/)
+  assert.match(page, /setEditingId\(''\)/)
+  assert.match(page, /setExistingImages\(\[\]\)/)
+  assert.match(page, /clearNewImageState\(\)/)
+  assert.match(page, /setSizeChartFile\(null\)/)
+  assert.match(page, /setError\(''\)/)
+  assert.match(page, /setStatus\(''\)/)
+  assert.match(page, /setExistingImages\(normalizeImages\(product\.images \|\| \[\]\)\)/)
+})

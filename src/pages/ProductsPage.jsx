@@ -1,12 +1,15 @@
 import { ArrowRight, X } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useSearchParams } from 'react-router-dom'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Link, useLocation, useNavigate, useNavigationType, useSearchParams } from 'react-router-dom'
 import FiltersBar from '../components/FiltersBar'
 import LoadingSkeleton from '../components/LoadingSkeleton'
 import ProductGrid from '../components/ProductGrid'
-import QuickShopModal from '../components/QuickShopModal'
 import SectionReveal from '../components/SectionReveal'
 import { useProducts } from '../hooks/useProducts'
+import { useBestSellers } from '../hooks/useBestSellers'
+import { useCart } from '../hooks/useCart'
+import { useToast } from '../hooks/useToast'
+import { scrollToProductResults, shouldScrollAfterFilterNavigation } from '../utils/scrollManagement'
 
 const initialFilters = {
   search: '',
@@ -90,6 +93,9 @@ function getDateValue(value) {
 }
 
 export default function ProductsPage() {
+  const navigate = useNavigate()
+  const location = useLocation()
+  const navigationType = useNavigationType()
   const [searchParams, setSearchParams] = useSearchParams()
   const categoryFromParams = searchParams.get('category') || ''
   const [filters, setFilters] = useState({
@@ -99,17 +105,77 @@ export default function ProductsPage() {
     maxPrice: searchParams.get('maxPrice') || '',
     sort: normalizeSortValue(searchParams.get('sort')),
   })
-  const [selectedProduct, setSelectedProduct] = useState(null)
   const [showAll, setShowAll] = useState(false)
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false)
   const [mobileSortOpen, setMobileSortOpen] = useState(false)
   const [scrollControlsVisible, setScrollControlsVisible] = useState(true)
   const [headerOffset, setHeaderOffset] = useState(0)
   const scrollStopTimerRef = useRef(null)
+  const previousFilterLocationRef = useRef(null)
+  const resultsScrollFrameRef = useRef(0)
   const mobilePanelOpenRef = useRef(false)
   const desktopSidebarRef = useRef(null)
   const desktopSortRef = useRef(null)
   const { products, loading, error } = useProducts()
+  const { addToCart, startBuyNow } = useCart()
+  const { success, error: toastError } = useToast()
+
+  const scheduleResultsScroll = useCallback(() => {
+    if (resultsScrollFrameRef.current) {
+      window.cancelAnimationFrame(resultsScrollFrameRef.current)
+    }
+    resultsScrollFrameRef.current = window.requestAnimationFrame(() => {
+      resultsScrollFrameRef.current = 0
+      scrollToProductResults()
+    })
+  }, [])
+
+  useLayoutEffect(() => {
+    const previousLocation = previousFilterLocationRef.current
+    previousFilterLocationRef.current = {
+      pathname: location.pathname,
+      search: location.search,
+    }
+    if (!previousLocation) return
+
+    const activeElement = document.activeElement
+    const isEditingTextFilter = Boolean(
+      activeElement?.matches('input:not([type="checkbox"]):not([type="radio"]), textarea')
+      && activeElement.closest('[data-product-filter-controls]'),
+    )
+    if (shouldScrollAfterFilterNavigation({
+      pathname: location.pathname,
+      previousSearch: previousLocation.search,
+      currentSearch: location.search,
+      navigationType,
+      isEditingTextFilter,
+    })) {
+      scheduleResultsScroll()
+    }
+  }, [location.pathname, location.search, navigationType, scheduleResultsScroll])
+
+  useEffect(() => () => {
+    if (resultsScrollFrameRef.current) window.cancelAnimationFrame(resultsScrollFrameRef.current)
+  }, [])
+
+  const handleAddToCart = (product) => {
+    try {
+      addToCart(product)
+      success(`${product.name} added to cart.`)
+    } catch (err) {
+      toastError(err?.message || 'Unable to add this product to the cart.')
+    }
+  }
+
+  const handleBuyNow = (product) => {
+    try {
+      startBuyNow(product, 1)
+      navigate('/cart?mode=buy-now')
+    } catch (err) {
+      toastError(err?.message || 'Unable to start checkout for this product.')
+      throw err
+    }
+  }
 
   useEffect(() => {
     mobilePanelOpenRef.current = mobileFiltersOpen || mobileSortOpen
@@ -179,11 +245,15 @@ export default function ProductsPage() {
     }),
     [filters, searchParams]
   )
+  const { productIds: bestSellerIds, loading: bestSellersLoading, error: bestSellersError, reload: reloadBestSellers } = useBestSellers(
+    activeFilters.sort === 'best-selling',
+  )
 
   const filteredProducts = useMemo(() => {
     const minPrice = Number(activeFilters.minPrice || 0)
     const maxPrice = Number(activeFilters.maxPrice || Number.POSITIVE_INFINITY)
     const query = activeFilters.search.trim().toLowerCase()
+    const bestSellerOrder = new Map(bestSellerIds.map((productId, index) => [productId, index]))
 
     const filtered = products.filter((product) => {
       const searchableText = `${product.name || ''} ${product.fabric || ''} ${product.category || ''}`.toLowerCase()
@@ -194,10 +264,14 @@ export default function ProductsPage() {
       const price = Number(product.price || 0)
       const priceMatch = price >= minPrice && price <= maxPrice
       const availableMatch = !activeFilters.onlyAvailable || product.inStock !== false
-      return nameMatch && categoryMatch && fabricMatch && sizeMatch && priceMatch && availableMatch
+      const bestSellerMatch = activeFilters.sort !== 'best-selling' || bestSellerOrder.has(product.id)
+      return nameMatch && categoryMatch && fabricMatch && sizeMatch && priceMatch && availableMatch && bestSellerMatch
     })
 
     return [...filtered].sort((a, b) => {
+      if (activeFilters.sort === 'best-selling') {
+        return bestSellerOrder.get(a.id) - bestSellerOrder.get(b.id)
+      }
       if (activeFilters.sort === 'featured') {
         const featuredA = Boolean(a.featured ?? a.isFeatured)
         const featuredB = Boolean(b.featured ?? b.isFeatured)
@@ -211,7 +285,7 @@ export default function ProductsPage() {
       if (activeFilters.sort === 'date-new') return getDateValue(b.createdAt) - getDateValue(a.createdAt)
       return 0
     })
-  }, [products, activeFilters, categoryFromParams])
+  }, [products, activeFilters, categoryFromParams, bestSellerIds])
 
   const visibleProducts = showAll ? filteredProducts : filteredProducts.slice(0, 8)
 
@@ -238,20 +312,22 @@ export default function ProductsPage() {
     setFilters(initialFilters)
     setSearchParams({})
     setShowAll(false)
+    scheduleResultsScroll()
   }
 
   const applyFilters = () => {
     setShowAll(false)
+    scheduleResultsScroll()
   }
 
   return (
-    <div className="mx-auto max-w-[1440px] px-5 py-14 lg:px-10 lg:py-20">
+    <div className="mx-auto max-w-[1440px] px-5 pb-12 pt-6 lg:px-10 lg:pb-16 lg:pt-8">
       <SectionReveal>
-        <div className="flex flex-col justify-between gap-6 border-b border-brand-pale-rose/10 pb-10 min-[769px]:flex-row min-[769px]:items-end">
+        <div className="flex flex-col justify-between gap-4 border-b border-brand-pale-rose/10 pb-6 min-[769px]:flex-row min-[769px]:items-end">
           <div>
             <p className="eyebrow-line">The catalogue</p>
             <h1 className="section-title">Find your next drape.</h1>
-            <p className="mt-4 max-w-lg text-sm leading-6 text-brand-dusty">
+            <p className="mt-2 max-w-lg text-sm leading-6 text-brand-dusty">
               Explore the available GV Sarees collection, with search, filters and details for every listed piece.
             </p>
           </div>
@@ -262,7 +338,7 @@ export default function ProductsPage() {
       </SectionReveal>
 
       <div
-        className="sticky z-50 -mx-5 mt-10 border-y border-brand-pale-rose/60 bg-brand-soft-white px-5 py-3 shadow-soft transition-[transform,opacity] duration-300 ease-out min-[769px]:hidden"
+        className="sticky z-50 -mx-5 mt-6 border-y border-brand-pale-rose/60 bg-brand-soft-white px-5 py-3 shadow-soft transition-[transform,opacity] duration-300 ease-out min-[769px]:hidden"
         style={{
           top: `${headerOffset}px`,
           opacity: scrollControlsVisible ? 1 : 0,
@@ -304,7 +380,7 @@ export default function ProductsPage() {
         )}
       </div>
 
-      <div className="mt-6 grid gap-10 min-[769px]:mt-10 min-[769px]:grid-cols-[minmax(210px,1fr)_minmax(0,3fr)]">
+      <div className="mt-4 grid gap-6 min-[769px]:mt-6 min-[769px]:grid-cols-[minmax(210px,1fr)_minmax(0,3fr)]">
         <div className="hidden min-[769px]:block min-[769px]:self-stretch">
           <aside
             ref={desktopSidebarRef}
@@ -326,7 +402,7 @@ export default function ProductsPage() {
           </aside>
         </div>
 
-        <section className="min-w-0">
+        <section data-scroll-results className="min-w-0">
           <div
             ref={desktopSortRef}
             className="sticky z-40 -mx-2 flex items-center justify-between gap-4 border-b border-brand-pale-rose/30 bg-brand-soft-white px-2 py-3 shadow-soft transition-[transform,opacity] duration-300 ease-out"
@@ -339,7 +415,11 @@ export default function ProductsPage() {
           >
             <div className="min-w-0">
               <p className="text-sm text-brand-dusty">
-                {loading ? 'Loading the catalogue…' : `${filteredProducts.length} ${filteredProducts.length === 1 ? 'piece' : 'pieces'} shown`}
+                {loading
+                  ? 'Loading the catalogue…'
+                  : activeFilters.sort === 'best-selling' && bestSellersLoading
+                    ? 'Loading best sellers…'
+                    : `${filteredProducts.length} ${filteredProducts.length === 1 ? 'piece' : 'pieces'} shown`}
               </p>
               {categoryFromParams && (
                 <button type="button" onClick={() => updateFilter('category', '')} className="mt-2 text-xs font-bold uppercase tracking-[0.16em] text-brand-dusty underline decoration-brand-rose-gold decoration-2 underline-offset-4">
@@ -352,14 +432,19 @@ export default function ProductsPage() {
             </div>
           </div>
 
-          <div className="mt-6">
-            {loading ? (
+          <div className="mt-4">
+            {loading || (activeFilters.sort === 'best-selling' && bestSellersLoading) ? (
               <LoadingSkeleton />
             ) : error ? (
               <div className="rounded-[2rem] border border-brand-pale-rose/40 bg-brand-card-white p-10 text-center text-brand-dusty">{error}</div>
+            ) : activeFilters.sort === 'best-selling' && bestSellersError ? (
+              <div className="rounded-[2rem] border border-brand-pale-rose/40 bg-brand-card-white p-10 text-center text-brand-dusty">
+                <p>{bestSellersError}</p>
+                <button type="button" onClick={reloadBestSellers} className="btn-outline mt-4">Try again</button>
+              </div>
             ) : (
               <>
-                <ProductGrid products={visibleProducts} onQuickShop={setSelectedProduct} />
+                <ProductGrid products={visibleProducts} onBuyNow={handleBuyNow} onAddToCart={handleAddToCart} prioritizeFirstImage />
                 {!showAll && filteredProducts.length > visibleProducts.length && (
                   <div className="pt-10 text-center">
                     <button type="button" onClick={() => setShowAll(true)} className="btn-gold">
@@ -373,7 +458,6 @@ export default function ProductsPage() {
         </section>
       </div>
 
-      <QuickShopModal product={selectedProduct} isOpen={Boolean(selectedProduct)} onClose={() => setSelectedProduct(null)} />
       {mobileSortOpen && (
         <MobileSortSheet
           value={activeFilters.sort}

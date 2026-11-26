@@ -3,12 +3,12 @@ import {
   doc,
   getDoc,
   getDocs,
+  getDocsFromServer,
   orderBy,
   query,
 } from 'firebase/firestore'
 import { auth, db } from './firebase'
 import { normalizeImageUrl, normalizeImages } from '../utils/imageHelpers'
-import { deleteTelegramMedia } from './telegramMediaService'
 
 function normalizeInventory(data) {
   const totalStock = Math.max(0, Number.isInteger(data.totalStock) ? data.totalStock : 0)
@@ -54,7 +54,8 @@ export async function fetchProducts(forceRefresh = false) {
 
   const productsQuery = query(productsCollection, orderBy('createdAt', 'desc'))
 
-  productsPromise = getDocs(productsQuery)
+  const readProducts = forceRefresh ? getDocsFromServer : getDocs
+  productsPromise = readProducts(productsQuery)
     .then((snapshot) => {
       productsCache = snapshot.docs.map(normalizeProduct)
       return productsCache
@@ -88,6 +89,8 @@ export async function createProduct(payload, idempotencyKey) {
   if (typeof idempotencyKey !== 'string' || !/^[A-Za-z0-9_-]{16,128}$/.test(idempotencyKey)) {
     throw new Error('A valid idempotency key is required.')
   }
+  const images = normalizeImages(payload.images || [])
+  if (!images.length) throw new Error('At least one product image is required.')
 
   const data = {
     action: 'create',
@@ -96,7 +99,7 @@ export async function createProduct(payload, idempotencyKey) {
     category: payload.category,
     description: payload.description,
     fabric: payload.fabric,
-    images: normalizeImages(payload.images || []),
+    images,
     sizeLength: payload.sizeLength || '',
     sizeChartText: payload.sizeChartText || '',
     ...(Object.prototype.hasOwnProperty.call(payload, 'sizeChartImage')
@@ -171,12 +174,6 @@ export async function removeProduct(productId) {
   })
   const body = await response.json().catch(() => ({}))
   if (!response.ok) throw new Error(body.message || 'Unable to delete product.')
-  let deleteResult
-  try {
-    deleteResult = await deleteTelegramMedia(body.images || [])
-  } catch (error) {
-    throw new Error(`Product deleted, but image cleanup failed: ${error.message}`)
-  }
   invalidateProductsCache()
-  return deleteResult
+  return { success: true, productId }
 }

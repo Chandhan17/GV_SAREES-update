@@ -4,6 +4,15 @@ import { sendError, setSecurityHeaders } from '../../server/http.js'
 import { db } from '../../server/reservationService.js'
 import { adjustInventory, setInventoryThreshold } from '../../server/inventory.js'
 import { inventoryAdjustmentSchema } from '../../server/validation.js'
+import { performance } from 'node:perf_hooks'
+
+function logInventoryUpdateTiming(startedAt, outcome) {
+  console.info('[admin-product-update-timing]', {
+    operation: 'inventory-firestore-update',
+    elapsedMs: Number((performance.now() - startedAt).toFixed(2)),
+    outcome,
+  })
+}
 
 export default async function handler(req, res) {
   setSecurityHeaders(res)
@@ -23,6 +32,7 @@ export default async function handler(req, res) {
   const parse = inventoryAdjustmentSchema.safeParse(body || {})
   if (!parse.success) return sendError(res, 400, 'Invalid inventory request', parse.error.format())
 
+  const firestoreStartedAt = performance.now()
   try {
     const result = await db.runTransaction(async (transaction) => {
       const productRef = db.collection('products').doc(parse.data.productId)
@@ -47,8 +57,10 @@ export default async function handler(req, res) {
       })
       return inventory
     })
+    logInventoryUpdateTiming(firestoreStartedAt, 'success')
     return res.status(200).json({ success: true, inventory: result })
   } catch (error) {
+    logInventoryUpdateTiming(firestoreStartedAt, 'failure')
     const status = error?.code === 'INVALID_LOW_STOCK_THRESHOLD' ? 400
       : ['PRODUCT_NOT_FOUND', 'INVALID_ADJUSTMENT', 'RESERVED_STOCK_PROTECTED'].includes(error?.code) ? 409 : 500
     return sendError(res, status, error?.message || 'Unable to update inventory.')

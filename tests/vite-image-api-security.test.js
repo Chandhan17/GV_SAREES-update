@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
+import { createApiProxyConfig } from '../server/apiProxyConfig.js'
+import productionDeleteHandler from '../api/delete-telegram-media.js'
 import { createProtectedLocalHandler } from '../server/localApiSecurity.js'
+import { telegramMediaDeletionDisabled } from '../server/telegramMediaDeletionDisabled.js'
 import { deleteTelegramSchema } from '../server/validation.js'
 
 function createResponse() {
@@ -66,72 +69,24 @@ test('development upload rejects non-admin requests before routing', async () =>
   assert.equal(delegated, false)
 })
 
-test('development deletion rejects unauthenticated requests before routing', async () => {
+test('authorized admin upload requests still reach the upload delegate', async () => {
   let delegated = false
   const handler = createProtectedLocalHandler({
-    verifyAdmin: rejectingVerifier(401, 'Unauthorized: Missing token'),
+    verifyAdmin: async () => ({ uid: 'admin-uid', email: 'admin@example.com' }),
     limiter: () => true,
     missingCredentialsMessage: 'Server configuration error',
     hasRequiredCredentials: () => true,
     delegate: async () => {
       delegated = true
+      return { success: true }
     },
   })
   const res = createResponse()
 
-  await handler({ method: 'POST', headers: {} }, res)
+  const result = await handler({ method: 'POST', headers: { authorization: 'Bearer admin' } }, res)
 
-  assert.equal(res.statusCode, 401)
-  assert.equal(delegated, false)
-})
-
-test('development deletion rejects non-admin requests before routing', async () => {
-  let delegated = false
-  const handler = createProtectedLocalHandler({
-    verifyAdmin: rejectingVerifier(401, 'Unauthorized: Admin access required'),
-    limiter: () => true,
-    missingCredentialsMessage: 'Server configuration error',
-    hasRequiredCredentials: () => true,
-    delegate: async () => {
-      delegated = true
-    },
-  })
-  const res = createResponse()
-
-  await handler({ method: 'POST', headers: { authorization: 'Bearer non-admin' } }, res)
-
-  assert.equal(res.statusCode, 401)
-  assert.equal(delegated, false)
-})
-
-test('authorized admin upload and deletion routes reach their delegates', async () => {
-  for (const method of ['upload', 'delete']) {
-    let delegated = false
-    const handler = createProtectedLocalHandler({
-      verifyAdmin: async (req, res) => {
-        void req
-        void res
-        return { uid: 'admin-uid', email: 'admin@example.com' }
-      },
-      limiter: (req, res) => {
-        void req
-        res.statusCode = 200
-        return true
-      },
-      missingCredentialsMessage: 'Server configuration error',
-      hasRequiredCredentials: () => true,
-      delegate: async () => {
-        delegated = true
-        return { success: true, method }
-      },
-    })
-    const res = createResponse()
-
-    const result = await handler({ method: 'POST', headers: { authorization: 'Bearer admin' } }, res)
-
-    assert.equal(delegated, true)
-    assert.equal(result.method, method)
-  }
+  assert.equal(delegated, true)
+  assert.equal(result.success, true)
 })
 
 test('protected mutation routes apply rate limiting after authorization', async () => {
@@ -245,11 +200,62 @@ test('strict Telegram deletion schema accepts existing valid formats', () => {
   }).success, true)
 })
 
+test('production Telegram deletion endpoint always returns 503 without authentication or Telegram calls', async () => {
+  const res = createResponse()
+
+  await productionDeleteHandler({
+    method: 'POST',
+    headers: { authorization: 'Bearer authenticated-admin' },
+    body: { items: [{ telegram_message_id: '123', telegram_chat_id: '-100123' }] },
+  }, res)
+
+  assert.equal(res.statusCode, 503)
+  assert.equal(JSON.parse(res.body).message, 'Telegram media deletion is temporarily disabled.')
+
+  const endpoint = readFileSync(new URL('../api/delete-telegram-media.js', import.meta.url), 'utf8')
+  assert.doesNotMatch(endpoint, /verifyAdmin|createTelegramMediaDeleteHandler|deleteMessage|telegramUpload/)
+})
+
+test('local Vite Telegram deletion handler returns 503 without delegation', () => {
+  const res = createResponse()
+
+  telegramMediaDeletionDisabled({
+    method: 'POST',
+    headers: { authorization: 'Bearer authenticated-admin' },
+    body: { items: [{ telegram_message_id: '123', telegram_chat_id: '-100123' }] },
+  }, res)
+
+  assert.equal(res.statusCode, 503)
+  assert.equal(JSON.parse(res.body).message, 'Telegram media deletion is temporarily disabled.')
+})
+
 test('Vite config keeps image retrieval public and mutation handlers protected', () => {
   const viteConfig = readFileSync(new URL('../vite.config.js', import.meta.url), 'utf8')
   assert.match(viteConfig, /createProtectedLocalHandler\(\{/)
   assert.match(viteConfig, /server\.middlewares\.use\('\/api\/upload-image', uploadHandler\)/)
-  assert.match(viteConfig, /server\.middlewares\.use\('\/api\/delete-telegram-media', deleteHandler\)/)
+  assert.match(viteConfig, /server\.middlewares\.use\('\/api\/delete-telegram-media', telegramMediaDeletionDisabled\)/)
   assert.match(viteConfig, /server\.middlewares\.use\('\/api\/image', proxyHandler\)/)
+  assert.doesNotMatch(viteConfig, /createTelegramMediaDeleteHandler|deleteMessage/)
   assert.doesNotMatch(viteConfig, /server\.middlewares\.use\('\/api\/upload-image', handler\)/)
+})
+
+test('Vite proxies admin settings and checkout APIs to Vercel Dev but keeps uploads local', () => {
+  const viteConfig = readFileSync(new URL('../vite.config.js', import.meta.url), 'utf8')
+  const proxyConfig = createApiProxyConfig('http://127.0.0.1:3000')
+  for (const path of [
+    '/api/admin/products',
+    '/api/admin/inventory',
+    '/api/admin/orders',
+    '/api/admin/reservations',
+    '/api/admin/settings',
+    '/api/reservations/create',
+  ]) {
+    assert.deepEqual(proxyConfig[path], {
+      target: 'http://127.0.0.1:3000',
+      changeOrigin: true,
+    })
+  }
+  assert.equal(Object.hasOwn(proxyConfig, '/api/reservations/cancel'), false)
+  assert.equal(Object.hasOwn(proxyConfig, '/api/upload-image'), false)
+  assert.equal((viteConfig.match(/server\.middlewares\.use\('\/api\/upload-image'/g) || []).length, 1)
 })

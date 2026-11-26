@@ -12,6 +12,11 @@ export function normalizeInventory(data = {}) {
   }
 }
 
+export function hasReservationStock(order = {}) {
+  if (typeof order.stockReserved === 'boolean') return order.stockReserved
+  return order.reservationStatus === 'active' && !order.stockDeducted && !order.stockRestored
+}
+
 export function assertQuantity(quantity) {
   if (!Number.isInteger(quantity) || quantity <= 0) {
     const error = new Error('Quantity must be a positive integer.')

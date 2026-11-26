@@ -1,4 +1,8 @@
 import { z } from 'zod'
+import {
+  buildCustomerAddress,
+  normalizeIndianMobileNumber,
+} from '../shared/customerValidation.js'
 
 const imageMetadataSchema = z.object({
   url: z.string().max(2048).optional(),
@@ -87,21 +91,72 @@ export const deleteTelegramSchema = z.object({
 })
 
 export const razorpayOrderSchema = z.object({
-  amount: z.number().int().positive().max(50000000),
-  currency: z.string().optional().default('INR'),
-  receipt: z.string().max(100).optional(),
-})
+  reservationId: z.string().uuid(),
+  cancellationToken: z.string().regex(/^[a-f0-9]{64}$/i),
+  idempotencyKey: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/),
+}).strict()
+
+export const razorpayVerificationSchema = z.object({
+  razorpay_order_id: z.string().regex(/^order_[A-Za-z0-9]+$/).max(64),
+  razorpay_payment_id: z.string().regex(/^pay_[A-Za-z0-9]+$/).max(64),
+  razorpay_signature: z.string().regex(/^[a-f0-9]{64}$/i),
+}).strict()
+
+export const razorpayFailureSchema = z.object({
+  reservationId: z.string().uuid(),
+  cancellationToken: z.string().regex(/^[a-f0-9]{64}$/i),
+  razorpay_order_id: z.string().regex(/^order_[A-Za-z0-9]+$/).max(64),
+  razorpay_payment_id: z.string().regex(/^pay_[A-Za-z0-9]+$/).max(64).optional(),
+}).strict()
+
+export const razorpayDismissalSchema = z.object({
+  action: z.literal('checkout-dismissed'),
+  reservationId: z.string().uuid(),
+  cancellationToken: z.string().regex(/^[a-f0-9]{64}$/i),
+  razorpay_order_id: z.string().regex(/^order_[A-Za-z0-9]+$/).max(64),
+}).strict()
 
 export const reservationSchema = z.object({
-  productId: z.string().min(1).max(128),
-  quantity: z.number().int().positive().max(100),
+  items: z.array(z.object({
+    productId: z.string().min(1).max(128),
+    quantity: z.number().int().positive().max(100000),
+    selectedSize: z.string().max(100).optional().default(''),
+  }).strict()).min(1).max(50).optional(),
+  productId: z.string().min(1).max(128).optional(),
+  quantity: z.number().int().positive().max(100000).optional(),
   selectedSize: z.string().max(100).optional().default(''),
   idempotencyKey: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/),
   customer: z.object({
-    name: z.string().trim().min(1).max(120),
-    phone: z.string().trim().min(5).max(30),
-    address: z.string().trim().min(1).max(500),
-  }),
+    name: z.string().trim().min(1).max(120).transform((value) => value.replace(/\s+/g, ' ')),
+    phone: z.string()
+      .trim()
+      .refine((value) => Boolean(normalizeIndianMobileNumber(value)), 'Enter a valid Indian mobile number.')
+      .transform((value) => normalizeIndianMobileNumber(value)),
+    doorNo: z.string().trim().min(1).max(80).transform((value) => value.replace(/\s+/g, ' ')),
+    streetName: z.string().trim().min(1).max(200).transform((value) => value.replace(/\s+/g, ' ')),
+    city: z.string().trim().min(1).max(100).transform((value) => value.replace(/\s+/g, ' ')),
+    pincode: z.string().trim().regex(/^\d{6}$/, 'PIN code must contain six digits.'),
+    state: z.string().trim().min(1).max(100).transform((value) => value.replace(/\s+/g, ' ')),
+  }).transform((customer) => ({
+    name: customer.name,
+    phone: customer.phone,
+    address: buildCustomerAddress(customer),
+  })),
+}).superRefine((value, context) => {
+  if (!value.items && (!value.productId || !Number.isInteger(value.quantity))) {
+    context.addIssue({
+      code: 'custom',
+      path: ['items'],
+      message: 'At least one valid reservation item is required.',
+    })
+  }
+  if (value.items && (value.productId || value.quantity !== undefined)) {
+    context.addIssue({
+      code: 'custom',
+      path: ['items'],
+      message: 'Use either items or the legacy single-product fields, not both.',
+    })
+  }
 })
 
 export const inventoryAdjustmentSchema = z.object({
@@ -120,7 +175,7 @@ export const inventoryAdjustmentSchema = z.object({
 })
 
 export const adminReservationSchema = z.object({
-  action: z.enum(['confirm', 'release', 'restock-cancelled', 'expire']),
+  action: z.enum(['release', 'restock-cancelled', 'expire', 'retry-refund']),
   reservationId: z.string().min(1).max(128),
   reason: z.string().trim().max(240).optional(),
 })
@@ -131,6 +186,26 @@ export const customerReservationCancellationSchema = z.object({
 })
 
 export const adminOrderActionSchema = z.discriminatedUnion('action', [
-  z.object({ action: z.literal('status'), orderId: z.string().min(1).max(128), orderStatus: z.enum(['initiated', 'confirmed', 'completed']) }),
+  z.object({
+    action: z.literal('status'),
+    orderId: z.string().min(1).max(128),
+    orderStatus: z.enum(['initiated', 'confirmed', 'processing', 'shipped', 'delivered', 'cancelled', 'completed']),
+  }),
   z.object({ action: z.literal('archive'), orderId: z.string().min(1).max(128) }),
-])
+  z.object({
+    action: z.literal('delete'),
+    orderIds: z.array(z.string().regex(/^[A-Za-z0-9_-]{1,128}$/)).min(1).max(100),
+  }),
+  z.object({
+    action: z.literal('permanent-delete'),
+    orderIds: z.array(z.string().regex(/^[A-Za-z0-9_-]{1,128}$/)).min(1).max(100),
+    backupDisposition: z.enum(['exported', 'skipped']),
+  }),
+]).superRefine((value, context) => {
+    if (
+      ['delete', 'permanent-delete'].includes(value.action)
+      && new Set(value.orderIds).size !== value.orderIds.length
+    ) {
+      context.addIssue({ code: 'custom', path: ['orderIds'], message: 'Order IDs must be unique.' })
+    }
+})

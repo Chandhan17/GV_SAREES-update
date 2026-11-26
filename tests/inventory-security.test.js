@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
+import { createApiProxyConfig } from '../server/apiProxyConfig.js'
 import {
   adjustInventory,
   convertInventory,
@@ -60,8 +61,11 @@ test('admin product detail edits omit inventory fields and send the threshold th
   assert.match(payloadMatch[1], /name:/)
   assert.match(payloadMatch[1], /images:/)
   assert.doesNotMatch(payloadMatch[1], /totalStock|reservedStock|availableStock|inStock|lowStockThreshold/)
-  assert.match(page, /await editProduct\(editingId, payload\)/)
-  assert.match(page, /await adjustProductInventory\(\{[\s\S]*lowStockThreshold:/)
+  assert.match(page, /saveProductUpdate\(\{/)
+  assert.match(page, /persistProduct:\s*editProduct/)
+  assert.match(page, /adjustInventory:\s*adjustProductInventory/)
+  const update = readFileSync(new URL('../src/utils/productUpdate.js', import.meta.url), 'utf8')
+  assert.match(update, /adjustInventory\(\{[\s\S]*lowStockThreshold:/)
   assert.match(page, /lowStockThreshold: Math\.max\(0, Number\(form\.lowStockThreshold\) \|\| 0\)/)
 })
 
@@ -163,7 +167,15 @@ test('reservation request schema rejects unsafe idempotency key and browser pric
     productId: 'product1',
     quantity: 1,
     idempotencyKey: 'key_0123456789abcdef',
-    customer: { name: 'A', phone: '12345', address: 'Somewhere' },
+    customer: {
+      name: 'A',
+      phone: '9876543210',
+      doorNo: '1',
+      streetName: 'Somewhere',
+      city: 'Chennai',
+      pincode: '600001',
+      state: 'Tamil Nadu',
+    },
     price: 1,
     paymentStatus: 'paid',
   }
@@ -186,12 +198,14 @@ test('cron authorization requires a long configured secret and compares exact va
   assert.equal(cronSecretMatches(secret, secret), true)
 })
 
-test('active reservation cannot be archived and reservation completion requires conversion', () => {
+test('active reservation cannot be archived and fulfillment requires captured payment', () => {
   assert.throws(() => assertOrderCanArchive({ reservationStatus: 'active' }), { code: 'ACTIVE_RESERVATION' })
   assert.doesNotThrow(() => assertOrderCanArchive({ reservationStatus: 'released' }))
-  assert.throws(() => validateOrderStatusTransition({ reservationId: 'r1', reservationStatus: 'active' }, 'confirmed'), { code: 'RESERVATION_ACTION_REQUIRED' })
-  assert.throws(() => validateOrderStatusTransition({ reservationId: 'r1', reservationStatus: 'active', orderStatus: 'initiated' }, 'completed'), { code: 'RESERVATION_NOT_CONVERTED' })
-  assert.doesNotThrow(() => validateOrderStatusTransition({ reservationId: 'r1', reservationStatus: 'converted', orderStatus: 'confirmed' }, 'completed'))
+  assert.throws(() => validateOrderStatusTransition({ orderStatus: 'initiated' }, 'confirmed'), { code: 'AUTOMATIC_CONFIRMATION_REQUIRED' })
+  assert.throws(() => validateOrderStatusTransition({ paymentMethod: 'razorpay', paymentStatus: 'authorized', orderStatus: 'confirmed' }, 'processing'), { code: 'PAYMENT_NOT_CAPTURED' })
+  assert.doesNotThrow(() => validateOrderStatusTransition({ paymentMethod: 'razorpay', paymentStatus: 'captured', orderStatus: 'confirmed' }, 'processing'))
+  assert.throws(() => validateOrderStatusTransition({ paymentMethod: 'razorpay', paymentStatus: 'captured', orderStatus: 'confirmed' }, 'cancelled'), { code: 'PAYMENT_REQUIRES_REFUND' })
+  assert.doesNotThrow(() => validateOrderStatusTransition({ paymentMethod: 'razorpay', paymentStatus: 'captured', refundStatus: 'processed', orderStatus: 'confirmed' }, 'cancelled'))
 })
 
 test('expired reservations are recognized at the expiry boundary', () => {
@@ -247,10 +261,30 @@ test('Firestore rules deny all direct order writes and constrain product updates
   assert.doesNotMatch(rules, /allow update: if isAdmin/)
 })
 
-test('Razorpay order creation endpoint is disabled pending a complete payment lifecycle', () => {
+test('Razorpay order creation validates reservation-backed requests and verification is server-side', () => {
   const route = readFileSync(new URL('../api/razorpay/create-order.js', import.meta.url), 'utf8')
-  assert.match(route, /410/)
-  assert.doesNotMatch(route, /orders\.create/)
+  const verification = readFileSync(new URL('../api/razorpay/verify.js', import.meta.url), 'utf8')
+  const webhook = readFileSync(new URL('../api/razorpay/webhook.js', import.meta.url), 'utf8')
+  const service = readFileSync(new URL('../server/razorpayPaymentService.js', import.meta.url), 'utf8')
+  const vite = readFileSync(new URL('../vite.config.js', import.meta.url), 'utf8')
+  const proxy = createApiProxyConfig('http://127.0.0.1:3000')
+  assert.match(route, /razorpayOrderSchema\.safeParse/)
+  assert.match(verification, /razorpayVerificationSchema\.safeParse/)
+  assert.match(webhook, /verifyRazorpayWebhookSignature\(rawBody, signature, secret\)/)
+  assert.match(webhook, /bodyParser: false/)
+  assert.match(service, /createHmac\('sha256'/)
+  assert.match(service, /rzp_test_/)
+  assert.doesNotMatch(vite, /localRazorpayApi|VITE_RAZORPAY_KEY_SECRET/)
+  for (const path of [
+    '/api/razorpay/create-order',
+    '/api/razorpay/verify',
+    '/api/razorpay/webhook',
+  ]) {
+    assert.deepEqual(proxy[path], {
+      target: 'http://127.0.0.1:3000',
+      changeOrigin: true,
+    })
+  }
 })
 
 test('public order creation helper is removed and admin order operations use server API', () => {
@@ -260,17 +294,34 @@ test('public order creation helper is removed and admin order operations use ser
   assert.match(service, /action: 'archive'/)
 })
 
-test('reservation creation and cancellation remain connected to customer WhatsApp flow', () => {
+test('shopping flow adds to cart without customer enquiry or cancellation APIs', () => {
   const modal = readFileSync(new URL('../src/components/QuickShopModal.jsx', import.meta.url), 'utf8')
   const service = readFileSync(new URL('../src/services/reservationService.js', import.meta.url), 'utf8')
-  assert.match(modal, /createWhatsAppReservation/)
-  assert.match(modal, /openWhatsApp/)
-  assert.match(modal, /rememberCustomerReservation/)
-  assert.match(service, /\/api\/reservations\/cancel/)
+  assert.match(modal, /addToCart\(product\)/)
+  assert.doesNotMatch(modal, /createCheckoutReservation|createWhatsAppReservation|openWhatsApp/)
+  assert.doesNotMatch(service, /api\/reservations\/cancel/)
 })
 
-test('admin order API schema admits only explicit status and archive actions', () => {
+test('admin order API schema validates status, archive, and bounded unique delete actions', () => {
   assert.equal(adminOrderActionSchema.safeParse({ action: 'status', orderId: 'o1', orderStatus: 'confirmed' }).success, true)
   assert.equal(adminOrderActionSchema.safeParse({ action: 'status', orderId: 'o1', orderStatus: 'paid' }).success, false)
   assert.equal(adminOrderActionSchema.safeParse({ action: 'delete', orderId: 'o1' }).success, false)
+  assert.equal(adminOrderActionSchema.safeParse({ action: 'delete', orderIds: ['o1', 'o2'] }).success, true)
+  assert.equal(adminOrderActionSchema.safeParse({ action: 'delete', orderIds: ['o1', 'o1'] }).success, false)
+  assert.equal(adminOrderActionSchema.safeParse({ action: 'delete', orderIds: ['../o1'] }).success, false)
+  assert.equal(adminOrderActionSchema.safeParse({
+    action: 'permanent-delete',
+    orderIds: ['o1'],
+    backupDisposition: 'skipped',
+  }).success, true)
+  assert.equal(adminOrderActionSchema.safeParse({
+    action: 'permanent-delete',
+    orderIds: ['o1', 'o1'],
+    backupDisposition: 'exported',
+  }).success, false)
+  assert.equal(adminOrderActionSchema.safeParse({
+    action: 'permanent-delete',
+    orderIds: ['o1'],
+    backupDisposition: 'unknown',
+  }).success, false)
 })

@@ -1,0 +1,43 @@
+{
+  "version": 2,
+  "framework": null,
+  "devCommand": null,
+  "env": {
+    "APP_MODE": "performance",
+    "GV_PERFORMANCE_API_RUNTIME": "vercel",
+    "VERCEL": "1",
+    "VERCEL_ENV": "development"
+  },
+  "builds": [
+    {
+      "src": "api/*.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "api/admin/*.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "api/image/[...path].js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "api/razorpay/*.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "api/reservations/*.js",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "^/api/image/(.*)$",
+      "dest": "/api/image/[...path].js?path=$1"
+    },
+    {
+      "src": "^/api/(?!_lib/)(.+)$",
+      "dest": "/api/$1.js"
+    }
+  ]
+}

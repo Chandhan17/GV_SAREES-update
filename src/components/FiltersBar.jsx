@@ -6,7 +6,7 @@ export default function FiltersBar({ filters, onChange, onClear, onApply, layout
   const isSidebar = layout === 'sidebar'
 
   return (
-    <section className={`rounded-[1.5rem] border border-brand-pale-rose/10 bg-brand-card-white p-5 shadow-soft md:p-6 ${isSidebar ? 'md:rounded-2xl md:p-5' : ''}`}>
+    <section data-product-filter-controls className={`rounded-[1.5rem] border border-brand-pale-rose/10 bg-brand-card-white p-5 shadow-soft md:p-6 ${isSidebar ? 'md:rounded-2xl md:p-5' : ''}`}>
       <div className="mb-5 flex items-center justify-between gap-4">
         <div className="flex items-center gap-2">
           <SlidersHorizontal size={17} className="text-brand-rose-gold" />

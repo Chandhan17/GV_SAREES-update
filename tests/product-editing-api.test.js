@@ -88,6 +88,46 @@ function createMockFirestore({ exists = true, failWrite = false } = {}) {
   }
 }
 
+function createMockDeletionFirestore({ products, orders = {}, failDelete = false }) {
+  const documents = new Map([
+    ...Object.entries(products).map(([id, value]) => [`products/${id}`, value]),
+    ...Object.entries(orders).map(([id, value]) => [`orders/${id}`, value]),
+  ])
+  const deleteCalls = []
+  let transactionCount = 0
+
+  return {
+    collection(name) {
+      return {
+        doc(id) {
+          return { id, key: `${name}/${id}` }
+        },
+      }
+    },
+    async runTransaction(callback) {
+      transactionCount += 1
+      return callback({
+        async get(ref) {
+          return {
+            exists: documents.has(ref.key),
+            data: () => documents.get(ref.key),
+          }
+        },
+        delete(ref) {
+          deleteCalls.push(ref.key)
+          if (failDelete) throw new Error('Firestore transaction failed')
+          documents.delete(ref.key)
+        },
+      })
+    },
+    getDocument(collection, id) {
+      return documents.get(`${collection}/${id}`)
+    },
+    getDeleteCalls: () => [...deleteCalls],
+    getTransactionCount: () => transactionCount,
+  }
+}
+
 function validUpdate(overrides = {}) {
   return {
     action: 'update',
@@ -243,6 +283,163 @@ test('Firestore transaction failure returns HTTP 500', async () => {
   assert.equal(res.statusCode, 500)
 })
 
+test('product deletion rejects missing, invalid, and non-string product IDs', async () => {
+  const firestore = createMockDeletionFirestore({ products: { p1: { reservedStock: 0 } } })
+  const handler = createAdminProductsHandler({
+    verifyAdminUser: async () => ({ uid: 'admin-1' }),
+    firestore,
+  })
+
+  for (const body of [
+    { action: 'delete' },
+    { action: 'delete', productId: '' },
+    { action: 'delete', productId: 42 },
+    { action: 'delete', productId: 'p'.repeat(129) },
+  ]) {
+    const res = createResponse()
+    await handler({ method: 'POST', headers: {}, body }, res)
+    assert.equal(res.statusCode, 400)
+  }
+
+  assert.equal(firestore.getTransactionCount(), 0)
+  assert.deepEqual(firestore.getDeleteCalls(), [])
+})
+
+test('product deletion rejects missing and non-admin authentication before touching Firestore', async () => {
+  for (const message of [
+    'Unauthorized: Missing token',
+    'Unauthorized: Invalid token',
+    'Unauthorized: Admin access required',
+  ]) {
+    const firestore = createMockDeletionFirestore({ products: { p1: { reservedStock: 0 } } })
+    const handler = createAdminProductsHandler({
+      verifyAdminUser: async (_req, res) => {
+        res.statusCode = 401
+        res.end(JSON.stringify({ success: false, message }))
+        return null
+      },
+      firestore,
+    })
+    const res = createResponse()
+
+    await handler({
+      method: 'POST',
+      headers: {},
+      body: { action: 'delete', productId: 'p1' },
+    }, res)
+
+    assert.equal(res.statusCode, 401)
+    assert.equal(firestore.getTransactionCount(), 0)
+    assert.deepEqual(firestore.getDeleteCalls(), [])
+  }
+})
+
+test('product deletion safely rejects a missing product', async () => {
+  const firestore = createMockDeletionFirestore({ products: {} })
+  const handler = createAdminProductsHandler({
+    verifyAdminUser: async () => ({ uid: 'admin-1' }),
+    firestore,
+  })
+  const res = createResponse()
+
+  await handler({
+    method: 'POST',
+    headers: {},
+    body: { action: 'delete', productId: 'missing-product' },
+  }, res)
+
+  assert.equal(res.statusCode, 404)
+  assert.equal(JSON.parse(res.body).message, 'Product not found.')
+  assert.deepEqual(firestore.getDeleteCalls(), [])
+})
+
+test('product deletion refuses products with reserved stock', async () => {
+  const product = { name: 'Reserved product', reservedStock: 1, images: ['/api/image/shared'] }
+  const firestore = createMockDeletionFirestore({ products: { p1: product } })
+  const handler = createAdminProductsHandler({
+    verifyAdminUser: async () => ({ uid: 'admin-1' }),
+    firestore,
+  })
+  const res = createResponse()
+
+  await handler({
+    method: 'POST',
+    headers: {},
+    body: { action: 'delete', productId: 'p1' },
+  }, res)
+
+  assert.equal(res.statusCode, 409)
+  assert.equal(JSON.parse(res.body).message, 'Product cannot be deleted while stock is reserved.')
+  assert.equal(firestore.getDocument('products', 'p1'), product)
+  assert.deepEqual(firestore.getDeleteCalls(), [])
+})
+
+test('valid deletion removes only the target product and leaves order image snapshots untouched', async () => {
+  const targetProduct = {
+    name: 'Target product',
+    reservedStock: 0,
+    images: ['/api/image/target-image'],
+  }
+  const otherProduct = {
+    name: 'Other product',
+    reservedStock: 0,
+    images: ['/api/image/other-image'],
+  }
+  const orderSnapshot = {
+    productId: 'p1',
+    image: '/api/image/target-image',
+  }
+  const firestore = createMockDeletionFirestore({
+    products: { p1: targetProduct, p2: otherProduct },
+    orders: { order1: orderSnapshot },
+  })
+  const handler = createAdminProductsHandler({
+    verifyAdminUser: async () => ({ uid: 'admin-1' }),
+    firestore,
+  })
+  const res = createResponse()
+
+  await handler({
+    method: 'POST',
+    headers: {},
+    body: { action: 'delete', productId: 'p1' },
+  }, res)
+
+  assert.equal(res.statusCode, 200)
+  assert.equal(JSON.parse(res.body).success, true)
+  assert.deepEqual(firestore.getDeleteCalls(), ['products/p1'])
+  assert.equal(firestore.getDocument('products', 'p1'), undefined)
+  assert.equal(firestore.getDocument('products', 'p2'), otherProduct)
+  assert.equal(firestore.getDocument('orders', 'order1'), orderSnapshot)
+
+  const api = readFileSync(new URL('../api/admin/products.js', import.meta.url), 'utf8')
+  assert.doesNotMatch(api, /createTelegramMediaDeleteHandler|deleteTelegramMedia|deleteMessage/)
+})
+
+test('product deletion surfaces Firestore transaction failures without deleting documents', async () => {
+  const product = { name: 'Target product', reservedStock: 0, images: [] }
+  const firestore = createMockDeletionFirestore({
+    products: { p1: product },
+    failDelete: true,
+  })
+  const handler = createAdminProductsHandler({
+    verifyAdminUser: async () => ({ uid: 'admin-1' }),
+    firestore,
+  })
+  const res = createResponse()
+
+  await handler({
+    method: 'POST',
+    headers: {},
+    body: { action: 'delete', productId: 'p1' },
+  }, res)
+
+  assert.equal(res.statusCode, 500)
+  assert.equal(JSON.parse(res.body).message, 'Unable to delete product.')
+  assert.equal(firestore.getDocument('products', 'p1'), product)
+  assert.deepEqual(firestore.getDeleteCalls(), ['products/p1'])
+})
+
 test('browser editProduct sends bearer token and no updateDoc', () => {
   const service = readFileSync(new URL('../src/services/productService.js', import.meta.url), 'utf8')
   assert.match(service, /export async function editProduct/)
@@ -252,16 +449,20 @@ test('browser editProduct sends bearer token and no updateDoc', () => {
   assert.doesNotMatch(service, /\bupdateDoc\s*\(/)
 
   const api = readFileSync(new URL('../api/admin/products.js', import.meta.url), 'utf8')
-  assert.match(api, /body\?\.\action === 'update'/)
+  assert.match(api, /body\?\.action === 'update'/)
 
   const page = readFileSync(new URL('../src/pages/AdminDashboardPage.jsx', import.meta.url), 'utf8')
   assert.doesNotMatch(page, /deleteTelegramMedia/)
-  assert.doesNotMatch(page, /\/api\/delete-telegram-media/)
+  assert.doesNotMatch(page, new RegExp('/api/delete-telegram-media'))
 })
 
 test('editProduct sends safe, selectively normalized update payloads using mocks', async (t) => {
   const mocks = {
     calls: [],
+    deleteCalls: 0,
+    productReads: 0,
+    serverProductReads: 0,
+    response: { ok: true, json: async () => ({ productId: 'target-id' }) },
     auth: { currentUser: { getIdToken: async () => 'mock-token' } },
     db: {},
   }
@@ -269,7 +470,7 @@ test('editProduct sends safe, selectively normalized update payloads using mocks
   globalThis.__productServiceMocks = mocks
   globalThis.fetch = async (url, options) => {
     mocks.calls.push({ url, options })
-    return { ok: true, json: async () => ({ productId: 'target-id' }) }
+    return mocks.response
   }
 
   const server = await createServer({
@@ -289,9 +490,9 @@ test('editProduct sends safe, selectively normalized update payloads using mocks
           return 'const mocks = globalThis.__productServiceMocks; export const auth = mocks.auth; export const db = mocks.db;'
         }
         if (id === '\0mock-product-firestore') {
-          return 'export const collection = () => ({}); export const doc = () => ({}); export const getDoc = () => {}; export const getDocs = () => {}; export const orderBy = () => ({}); export const query = () => ({});'
+          return 'export const collection = () => ({}); export const doc = () => ({}); export const getDoc = () => {}; export const getDocs = async () => { globalThis.__productServiceMocks.productReads += 1; return { docs: [] }; }; export const getDocsFromServer = async () => { globalThis.__productServiceMocks.serverProductReads += 1; return { docs: [] }; }; export const orderBy = () => ({}); export const query = () => ({});'
         }
-        if (id === '\0mock-telegram-media') return 'export const deleteTelegramMedia = async () => {}'
+        if (id === '\0mock-telegram-media') return 'export const deleteTelegramMedia = async () => { globalThis.__productServiceMocks.deleteCalls += 1; }'
         return null
       },
     }],
@@ -300,7 +501,7 @@ test('editProduct sends safe, selectively normalized update payloads using mocks
   })
 
   try {
-    const { editProduct } = await server.ssrLoadModule('/src/services/productService.js')
+    const { editProduct, fetchProducts, invalidateProductsCache, removeProduct } = await server.ssrLoadModule('/src/services/productService.js')
     const getRequestBody = async (productId, payload) => {
       mocks.calls.length = 0
       await editProduct(productId, payload)
@@ -365,6 +566,63 @@ test('editProduct sends safe, selectively normalized update payloads using mocks
         telegram_chat_id: null,
       }])
     })
+
+    await t.test('forced product refresh reads current inventory from the server', async () => {
+      invalidateProductsCache()
+      await fetchProducts(true)
+      assert.equal(mocks.serverProductReads, 1)
+      assert.equal(mocks.productReads, 0)
+    })
+
+    await t.test('product deletion calls only the authenticated product API and invalidates cache', async () => {
+      invalidateProductsCache()
+      mocks.calls.length = 0
+      mocks.productReads = 0
+      mocks.deleteCalls = 0
+      mocks.response = { ok: true, json: async () => ({ success: true, images: [] }) }
+
+      await fetchProducts()
+      assert.equal(mocks.productReads, 1)
+
+      const result = await removeProduct('target-id')
+
+      assert.deepEqual(result, { success: true, productId: 'target-id' })
+      assert.equal(mocks.calls.length, 1)
+      assert.equal(mocks.calls[0].url, '/api/admin/products')
+      assert.equal(mocks.calls[0].options.method, 'POST')
+      assert.equal(mocks.calls[0].options.headers.Authorization, 'Bearer mock-token')
+      assert.deepEqual(JSON.parse(mocks.calls[0].options.body), {
+        action: 'delete',
+        productId: 'target-id',
+      })
+      assert.equal(mocks.deleteCalls, 0)
+
+      await fetchProducts()
+      assert.equal(mocks.productReads, 2)
+
+      const service = readFileSync(new URL('../src/services/productService.js', import.meta.url), 'utf8')
+      assert.doesNotMatch(service, /deleteTelegramMedia/)
+      assert.doesNotMatch(service, new RegExp('/api/delete-telegram-media'))
+    })
+
+    await t.test('product deletion still reports HTTP failures without cleanup calls', async () => {
+      await fetchProducts()
+      const readCount = mocks.productReads
+      mocks.calls.length = 0
+      mocks.deleteCalls = 0
+      mocks.response = { ok: false, json: async () => ({ message: 'Product delete rejected.' }) }
+
+      await assert.rejects(removeProduct('target-id'), /Product delete rejected\./)
+
+      assert.equal(mocks.calls.length, 1)
+      assert.equal(mocks.calls[0].url, '/api/admin/products')
+      assert.equal(mocks.deleteCalls, 0)
+
+      await fetchProducts()
+      assert.equal(mocks.productReads, readCount)
+
+      mocks.response = { ok: true, json: async () => ({ productId: 'target-id' }) }
+    })
   } finally {
     await server.close()
     globalThis.fetch = previousFetch
@@ -374,7 +632,7 @@ test('editProduct sends safe, selectively normalized update payloads using mocks
 
 test('product creation and delete actions remain in the API', () => {
   const api = readFileSync(new URL('../api/admin/products.js', import.meta.url), 'utf8')
-  assert.match(api, /body\?\.\action === 'create'/)
+  assert.match(api, /body\?\.action === 'create'/)
   assert.match(api, /const parse = deleteSchema\.safeParse/)
   assert.match(api, /transaction\.delete/)
 })
