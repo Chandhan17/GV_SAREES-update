@@ -342,6 +342,31 @@ export function isReservationEligibleForPayment(order, now = Date.now()) {
     && order.orderStatus !== 'completed'
 }
 
+function isRetryableExpiredRazorpayReservation(order, now = Date.now()) {
+  const reservationExpired = ['expired', 'released'].includes(order.reservationStatus)
+    || (order.reservationStatus === 'active' && isExpired(order, now))
+  if (
+    !reservationExpired
+    || order.paymentMethod !== 'razorpay'
+    || order.stockDeducted === true
+    || order.stockRestored === true
+    || ['cancelled', 'completed'].includes(order.orderStatus)
+    || ['captured', 'paid', 'authorized'].includes(order.paymentStatus)
+  ) return false
+
+  const attempts = Object.values(order.paymentAttempts || {})
+  const attemptStatuses = attempts.flatMap((attempt) => [
+    attempt?.status,
+    ...Object.values(attempt?.payments || {}).map((payment) => payment?.status),
+  ])
+  if (attemptStatuses.some((status) => ['captured', 'authorized'].includes(status))) return false
+
+  return order.checkoutAbandoned === true
+    || (order.reservationStatus === 'expired' && order.paymentStatus === 'failed')
+    || (order.reservationStatus === 'active' && order.paymentStatus === 'failed')
+    || (order.reservationStatus === 'active' && attempts.length === 0)
+}
+
 function nextReservationRequestKey(idempotencyKey, reservationId) {
   return createHash('sha256')
     .update(`reservation-generation\0${idempotencyKey}\0${reservationId}`)
@@ -505,7 +530,10 @@ export async function createCheckoutReservation({
 
       const order = { id: existingOrderSnapshot.id, ...existingOrderSnapshot.data() }
       const expiredActiveReservation = order.reservationStatus === 'active' && isExpired(order, now())
-      if (!expiredActiveReservation && isReservationEligibleForPayment(order, now())) {
+      if (
+        (!expiredActiveReservation && isReservationEligibleForPayment(order, now()))
+        || isRetryableExpiredRazorpayReservation(order, now())
+      ) {
         reusableOrder = order
         break
       }
@@ -588,6 +616,64 @@ export async function createCheckoutReservation({
     }
 
     if (reusableOrder) {
+      if (isRetryableExpiredRazorpayReservation(reusableOrder, now())) {
+        const quantities = getProductQuantities(getReservationItems(reusableOrder))
+        if (!quantities.size) {
+          throw Object.assign(new Error('The expired reservation has no valid inventory items.'), {
+            code: 'RESERVATION_STOCK_MISMATCH',
+          })
+        }
+
+        const reacquired = new Map()
+        if (!hasReservationStock(reusableOrder)) {
+          for (const [id, totalQuantity] of quantities) {
+            const snapshot = productSnapshots.get(id)
+            if (!snapshot?.exists) {
+              throw Object.assign(new Error('A reserved product could not be found.'), {
+                code: 'PRODUCT_NOT_FOUND',
+              })
+            }
+            const product = inventoryState.get(id)
+            reacquired.set(id, {
+              product,
+              inventory: reserveInventory(product, totalQuantity),
+            })
+          }
+
+          const reacquiredAt = timestamp.now()
+          for (const [id, result] of reacquired) {
+            inventoryState.set(id, result.inventory)
+            transaction.update(productSnapshots.get(id).ref, result.inventory)
+            transaction.set(historyRef(firestore), {
+              productId: id,
+              actionType: 'reserve',
+              quantityChanged: quantities.get(id),
+              previousQuantity: normalizeInventory(result.product).reservedStock,
+              newQuantity: normalizeInventory(result.inventory).reservedStock,
+              reason: 'Inventory revalidated for Razorpay payment retry',
+              reservationId: reusableOrder.reservationId,
+              orderId: reusableOrder.id,
+              timestamp: reacquiredAt,
+            })
+          }
+        }
+
+        const renewedAt = timestamp.now()
+        const renewal = {
+          reservationStatus: 'active',
+          reservedAt: renewedAt,
+          expiresAt,
+          releasedAt: null,
+          stockReserved: true,
+          stockReleasedAt: null,
+          checkoutAbandoned: false,
+          inventoryOwnershipStatus: 'held',
+          ...(reacquired.size ? { stockReacquiredAt: renewedAt } : {}),
+        }
+        transaction.update(orderRef(reusableOrder.id, firestore), renewal)
+        Object.assign(reusableOrder, renewal)
+      }
+
       reusableOrder.cancellationToken = makeCancellationToken(
         cancellationSecret,
         reusableOrder.reservationId,

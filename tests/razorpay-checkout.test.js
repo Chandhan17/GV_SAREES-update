@@ -171,7 +171,7 @@ function createDependencies(overrides = {}) {
     },
     reportDismissal: async (input) => {
       calls.dismissals.push(input)
-      return { status: 'pending', inventoryStatus: 'released' }
+      return { status: 'pending', inventoryStatus: 'held' }
     },
     ...overrides,
   }
@@ -406,7 +406,7 @@ test('checkout network error reconciles through dismissal without assuming payme
   assert.equal(calls.failures.length, 0)
 })
 
-test('dismissed checkout releases unresolved inventory through the backend without marking payment failed', async () => {
+test('dismissed checkout retains unresolved inventory through the backend without marking payment failed', async () => {
   const { dependencies, calls } = createDependencies({
     openCheckout: async () => ({ type: 'cancelled' }),
   })
@@ -423,33 +423,33 @@ test('dismissed checkout releases unresolved inventory through the backend witho
     cancellationToken: reservation.cancellationToken,
     razorpay_order_id: order.razorpayOrderId,
   })
-  assert.equal(result.inventoryStatus, 'released')
+  assert.equal(result.inventoryStatus, 'held')
 })
 
-test('retry after checkout dismissal starts fresh checkout attempts', async () => {
+test('retry after checkout dismissal reuses the same reservation and payment attempt', async () => {
+  let savedCheckoutKey = ''
+  let nextCheckoutKey = 0
   const { dependencies, calls } = createDependencies({
     openCheckout: async () => ({ type: 'cancelled' }),
     createReservation: async (input) => {
       calls.reservations.push(input)
-      return {
-        ...reservation,
-        reservationId: `reservation-${calls.reservations.length}`,
-      }
+      return reservation
     },
-    getCheckoutKey: () => '',
-    createCheckoutKey: (() => {
-      let key = 0
-      return () => `payment-attempt-key-${++key}`
-    })(),
+    rememberReservation: (...args) => {
+      calls.remembered.push(args)
+      savedCheckoutKey = args[1] || savedCheckoutKey
+    },
+    getCheckoutKey: () => savedCheckoutKey,
+    createCheckoutKey: () => `payment-attempt-key-${++nextCheckoutKey}`,
   })
 
   await checkoutReservation({ item, customer, productName: 'Test saree' }, dependencies)
   await checkoutReservation({ item, customer, productName: 'Test saree' }, dependencies)
 
   assert.equal(calls.reservations.length, 2)
-  assert.notEqual(calls.orderRequests[0].reservationId, calls.orderRequests[1].reservationId)
+  assert.equal(calls.orderRequests[0].reservationId, calls.orderRequests[1].reservationId)
   assert.equal(calls.orderRequests.length, 2)
-  assert.notEqual(calls.orderRequests[0].idempotencyKey, calls.orderRequests[1].idempotencyKey)
+  assert.equal(calls.orderRequests[0].idempotencyKey, calls.orderRequests[1].idempotencyKey)
   assert.equal(calls.dismissals.length, 2)
   assert.equal(calls.failures.length, 0)
 })
@@ -479,7 +479,7 @@ test('checkout open network errors use dismissal reconciliation', async () => {
   })
   const result = await checkoutReservation({ item, customer, productName: 'Test saree' }, dependencies)
   assert.equal(result.checkoutStatus, 'cancelled')
-  assert.equal(result.inventoryStatus, 'released')
+  assert.equal(result.inventoryStatus, 'held')
   assert.equal(calls.dismissals.length, 1)
   assert.equal(calls.failures.length, 0)
 })
@@ -506,7 +506,7 @@ test('checkout retries a transient dismissal failure with the same idempotent re
     reportDismissal: async () => {
       calls += 1
       if (calls === 1) throw Object.assign(new Error('Temporary service failure.'), { status: 503 })
-      return { status: 'pending', inventoryStatus: 'released' }
+      return { status: 'pending', inventoryStatus: 'held' }
     },
   })
 
@@ -514,7 +514,7 @@ test('checkout retries a transient dismissal failure with the same idempotent re
 
   assert.equal(calls, 2)
   assert.equal(result.dismissalReconciled, true)
-  assert.equal(result.inventoryStatus, 'released')
+  assert.equal(result.inventoryStatus, 'held')
 })
 
 test('checkout uses the successful dismissal response when the follow-up status read fails', async () => {
@@ -526,13 +526,13 @@ test('checkout uses the successful dismissal response when the follow-up status 
       if (statusReads > 1) throw new Error('Status API unavailable.')
       return { paymentStatus: 'pending', inventoryStatus: 'held' }
     },
-    reportDismissal: async () => ({ status: 'pending', inventoryStatus: 'released' }),
+    reportDismissal: async () => ({ status: 'pending', inventoryStatus: 'held' }),
   })
 
   const result = await checkoutReservation({ item, customer, productName: 'Test saree' }, dependencies)
 
   assert.equal(result.dismissalReconciled, true)
-  assert.equal(result.inventoryStatus, 'released')
+  assert.equal(result.inventoryStatus, 'held')
 })
 
 test('captured webhook status after checkout is reflected from the status API', async () => {

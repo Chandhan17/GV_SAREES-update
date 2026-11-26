@@ -320,7 +320,7 @@ test('identical request reuses an active reservation after a failed payment', as
   assert.equal(mock.get('products', 'product-1').reservedStock, 0)
 })
 
-test('identical request replaces an expired reservation and atomically reacquires its stock', async () => {
+test('identical request revalidates an expired reservation without creating another order', async () => {
   const { mock, timestamp } = createFixture()
   const first = await createReservation(mock, timestamp)
   mock.update('orders', first.orderId, {
@@ -328,16 +328,96 @@ test('identical request replaces an expired reservation and atomically reacquire
   })
 
   const retry = await createReservation(mock, timestamp)
+  const renewedOrder = mock.get('orders', first.orderId)
 
-  assert.notEqual(retry.reservationId, first.reservationId)
+  assert.equal(retry.reservationId, first.reservationId)
+  assert.equal(retry.orderId, first.orderId)
   assert.equal(retry.reservationStatus, 'active')
-  assert.equal(mock.get('orders', first.orderId).reservationStatus, 'expired')
-  assert.equal(mock.get('orders', first.orderId).stockReserved, false)
-  assert.equal(mock.list('orders').length, 2)
-  assert.equal(mock.list('reservationRequests').length, 2)
+  assert.equal(renewedOrder.reservationStatus, 'active')
+  assert.equal(renewedOrder.stockReserved, true)
+  assert.ok(renewedOrder.expiresAt.toMillis() > Date.now())
+  assert.equal(mock.list('orders').length, 1)
+  assert.equal(mock.list('reservationRequests').length, 1)
   assert.deepEqual(
     [mock.get('products', 'product-1').reservedStock, mock.get('products', 'product-1').availableStock],
     [2, 8],
+  )
+})
+
+test('expired failed-payment retry revalidates stock and reuses the original order', async () => {
+  const { mock, timestamp } = createFixture()
+  const first = await createReservation(mock, timestamp)
+  await failReservationPayment(mock, timestamp, first)
+  mock.update('orders', first.orderId, {
+    expiresAt: createTimestamp(Date.now() - 1),
+  })
+
+  const retry = await createReservation(mock, timestamp)
+  const renewedOrder = mock.get('orders', first.orderId)
+
+  assert.equal(retry.orderId, first.orderId)
+  assert.equal(retry.reservationId, first.reservationId)
+  assert.equal(renewedOrder.paymentStatus, 'failed')
+  assert.equal(renewedOrder.reservationStatus, 'active')
+  assert.equal(renewedOrder.stockReserved, true)
+  assert.equal(mock.list('orders').length, 1)
+  assert.deepEqual(
+    [mock.get('products', 'product-1').reservedStock, mock.get('products', 'product-1').availableStock],
+    [2, 8],
+  )
+})
+
+test('released legacy checkout retries reuse the original order after stock is revalidated', async () => {
+  const { mock, timestamp } = createFixture()
+  const first = await createReservation(mock, timestamp)
+  mock.update('orders', first.orderId, {
+    reservationStatus: 'released',
+    stockReserved: false,
+    checkoutAbandoned: true,
+    paymentMethod: 'razorpay',
+    paymentStatus: 'pending',
+    paymentAttempts: {
+      attempt: { status: 'pending', razorpayOrderId: 'order_previous1' },
+    },
+  })
+  mock.update('products', 'product-1', { reservedStock: 0, availableStock: 10 })
+
+  const retry = await createReservation(mock, timestamp)
+  const renewedOrder = mock.get('orders', first.orderId)
+
+  assert.equal(retry.orderId, first.orderId)
+  assert.equal(retry.reservationId, first.reservationId)
+  assert.equal(renewedOrder.reservationStatus, 'active')
+  assert.equal(renewedOrder.checkoutAbandoned, false)
+  assert.equal(renewedOrder.stockReserved, true)
+  assert.equal(mock.list('orders').length, 1)
+  assert.deepEqual(
+    [mock.get('products', 'product-1').reservedStock, mock.get('products', 'product-1').availableStock],
+    [2, 8],
+  )
+})
+
+test('expired payment retry cannot reacquire stock that is no longer available', async () => {
+  const { mock, timestamp } = createFixture()
+  const first = await createReservation(mock, timestamp)
+  await failReservationPayment(mock, timestamp, first)
+  mock.update('orders', first.orderId, {
+    expiresAt: createTimestamp(Date.now() - 1),
+  })
+  mock.update('products', 'product-1', {
+    totalStock: 1,
+    reservedStock: 0,
+    availableStock: 1,
+    inStock: true,
+  })
+
+  await assert.rejects(createReservation(mock, timestamp), { code: 'INSUFFICIENT_STOCK' })
+
+  assert.equal(mock.list('orders').length, 1)
+  assert.equal(mock.get('orders', first.orderId).stockReserved, false)
+  assert.deepEqual(
+    [mock.get('products', 'product-1').reservedStock, mock.get('products', 'product-1').availableStock],
+    [0, 1],
   )
 })
 
@@ -388,7 +468,7 @@ test('identical request replaces a released reservation without changing its his
   assert.equal(mock.get('products', 'product-1').reservedStock, 2)
 })
 
-test('concurrent retries after expiration create one replacement reservation', async () => {
+test('concurrent retries after expiration reuse one reservation and inventory hold', async () => {
   const { mock, timestamp } = createFixture()
   const first = await createReservation(mock, timestamp)
   mock.update('orders', first.orderId, {
@@ -400,9 +480,9 @@ test('concurrent retries after expiration create one replacement reservation', a
   )
 
   assert.equal(new Set(retries.map(({ reservationId }) => reservationId)).size, 1)
-  assert.notEqual(retries[0].reservationId, first.reservationId)
-  assert.equal(mock.list('orders').length, 2)
-  assert.equal(mock.list('reservationRequests').length, 2)
+  assert.equal(retries[0].reservationId, first.reservationId)
+  assert.equal(mock.list('orders').length, 1)
+  assert.equal(mock.list('reservationRequests').length, 1)
   assert.deepEqual(
     [mock.get('products', 'product-1').reservedStock, mock.get('products', 'product-1').availableStock],
     [2, 8],

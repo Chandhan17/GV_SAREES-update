@@ -756,8 +756,6 @@ export async function abandonRazorpayCheckout({
       const snapshot = await transaction.get(orderRef)
       if (!snapshot.exists) throw paymentError('RESERVATION_NOT_FOUND', 'Reservation not found.')
       const order = snapshot.data()
-      const productSnapshot = await transaction.get(firestore.collection('products').doc(order.productId))
-      const inventoryBefore = productSnapshot.exists ? normalizeInventory(productSnapshot.data()) : null
       const attempts = getPaymentAttempts(order)
       const [attemptKey, attempt] = findAttemptByOrderId(order, razorpayOrderId) || []
       if (!attempt || attemptKey !== storedAttempt[0]) {
@@ -776,84 +774,46 @@ export async function abandonRazorpayCheckout({
       const paymentOutcome = reconciliationError && aggregateStatus === 'pending'
         ? 'unresolved'
         : aggregateStatus
-      const hasCapturedPayment = aggregateStatus === 'captured'
-      const hasAuthorizedPayment = aggregateStatus === 'authorized'
-      const otherUnresolvedAttempt = Object.entries(updatedAttempts).some(([key, candidate]) => (
-        key !== attemptKey && getEffectiveAttemptStatus(candidate) !== 'failed'
-      ))
       const update = {
         paymentAttempts: updatedAttempts,
         checkoutDismissedAt: dismissedAt,
         checkoutStatus: 'dismissed',
+        paymentStatus: aggregateStatus,
         ...(reconciliationError ? {
           paymentReconciliationStatus: order.paymentReconciliationStatus === 'manual_review'
             ? 'manual_review'
             : 'pending',
           paymentReconciliationReason: 'payment_status_unavailable_after_checkout_dismissal',
-        } : {}),
-      }
-      let releaseOperationResult = 'already_released'
-      let inventoryAfter = inventoryBefore
-
-      if (hasCapturedPayment || hasAuthorizedPayment) {
-        const ownerStatus = hasReservationStock(order) ? 'held' : order.inventoryOwnershipStatus
-        update.paymentStatus = aggregateStatus
-        update.inventoryOwnershipStatus = ownerStatus
-        transaction.update(orderRef, update)
-        releaseOperationResult = hasCapturedPayment ? 'protected_captured' : 'protected_authorized'
-        return {
-          status: aggregateStatus,
-          inventoryStatus: ownerStatus === 'held' ? 'held' : ownerStatus || 'consumed',
-          paymentOutcome,
-          releaseOperationResult,
-          productId: order.productId,
-          previousStockReserved: hasReservationStock(order),
-          inventoryBefore,
-          inventoryAfter,
-        }
-      }
-
-      if (order.paymentStatus !== 'captured' && !otherUnresolvedAttempt) {
-        const release = await releaseReservationStockInTransaction(
-          transaction,
-          orderRef,
-          order,
-          {
-            firestore,
-            timestamp,
-            reason: 'Razorpay Checkout dismissed before capture',
-            productSnapshot,
-          },
-        )
-        Object.assign(update, release.orderPatch)
-        update.reservationStatus = 'released'
-        update.releasedAt = dismissedAt
-        update.checkoutAbandoned = true
-        update.inventoryOwnershipStatus = 'released'
-        update.paymentStatus = aggregateStatus === 'failed' ? 'failed' : 'pending'
-        if (aggregateStatus !== 'failed') {
-          update.paymentReconciliationStatus = 'pending'
-          update.paymentReconciliationReason = reconciliationError
-            ? 'payment_status_unavailable_after_checkout_dismissal'
-            : 'checkout_dismissed_payment_unresolved'
-        }
-        inventoryAfter = release.inventory || inventoryBefore
-        releaseOperationResult = hasReservationStock(order) ? 'released' : 'already_released'
-      } else if (otherUnresolvedAttempt) {
-        releaseOperationResult = 'retained_other_unresolved_attempt'
+        } : aggregateStatus === 'failed' && order.paymentReconciliationStatus === 'pending'
+          ? {
+            paymentReconciliationStatus: null,
+            paymentReconciliationReason: null,
+          }
+          : {}),
       }
       transaction.update(orderRef, update)
+
+      const hasStockHold = hasReservationStock(order)
+      const inventoryStatus = hasStockHold
+        ? 'held'
+        : order.inventoryOwnershipStatus === 'consumed'
+          ? 'consumed'
+          : reconciliationError && aggregateStatus !== 'failed'
+            ? 'released_pending_verification'
+            : 'released'
+      const releaseOperationResult = aggregateStatus === 'captured'
+        ? 'protected_captured'
+        : aggregateStatus === 'authorized'
+          ? 'protected_authorized'
+          : hasStockHold
+            ? 'retained_pending'
+            : 'already_released'
+
       return {
-        status: update.paymentStatus || aggregateStatus,
-        inventoryStatus: hasReservationStock(order) && update.stockReserved !== false
-          ? 'held'
-          : 'released',
+        status: aggregateStatus,
+        inventoryStatus,
         paymentOutcome,
         releaseOperationResult,
-        productId: order.productId,
-        previousStockReserved: hasReservationStock(order),
-        inventoryBefore,
-        inventoryAfter,
       }
     })
   } catch (error) {
@@ -864,10 +824,6 @@ export async function abandonRazorpayCheckout({
       paymentOutcome: reconciliationError ? 'unresolved' : getEffectiveAttemptStatus(storedAttempt[1]),
       previousStockReserved: hasReservationStock(storedOrder),
       releaseOperationResult: 'failed',
-      reservedStockBefore: null,
-      reservedStockAfter: null,
-      availableStockBefore: null,
-      availableStockAfter: null,
       errorCode: error?.code || 'UNKNOWN',
     }))
     throw error
@@ -876,21 +832,12 @@ export async function abandonRazorpayCheckout({
   console.info('[razorpay-checkout-dismissal] ' + JSON.stringify({
     reservationId,
     razorpayOrderId,
-    productId: result.productId,
+    productId: storedOrder.productId || null,
     paymentOutcome: result.paymentOutcome,
-    previousStockReserved: result.previousStockReserved,
+    previousStockReserved: hasReservationStock(storedOrder),
     releaseOperationResult: result.releaseOperationResult,
-    reservedStockBefore: result.inventoryBefore?.reservedStock ?? null,
-    reservedStockAfter: result.inventoryAfter?.reservedStock ?? null,
-    availableStockBefore: result.inventoryBefore?.availableStock ?? null,
-    availableStockAfter: result.inventoryAfter?.availableStock ?? null,
   }))
-  return {
-    status: result.status,
-    inventoryStatus: result.inventoryStatus,
-    paymentOutcome: result.paymentOutcome,
-    releaseOperationResult: result.releaseOperationResult,
-  }
+  return result
 }
 
 function reconciliationUnavailable() {

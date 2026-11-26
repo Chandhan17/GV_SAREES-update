@@ -209,7 +209,7 @@ export default function CartPage() {
               ? result.status === 'pending'
                 ? 'Checkout was closed and stock was released, but the previous payment is still being verified. Your cart is unchanged; avoid another payment until its status is confirmed.'
                 : 'Checkout was closed and the reserved stock was released. Your cart quantity is unchanged; adjust it and retry whenever you are ready.'
-              : 'Checkout was closed. Payment status is unresolved; inventory cleanup will retry automatically. Check My Orders before retrying.'
+            : 'Checkout was closed. Payment status is unresolved and your stock remains reserved. You can retry checkout or check My Orders for updates.'
         setCheckoutMessage(message)
         setCheckoutMessageTone(result.dismissalReconciled && result.inventoryStatus === 'released' ? 'pending' : 'error')
       } else if (result.checkoutStatus === 'failed' || result.status === 'failed') {

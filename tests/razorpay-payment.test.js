@@ -869,9 +869,15 @@ test('verified failure releases stock once, then retry reuses the reservation an
   assert.equal(mock.list('inventoryHistory').filter((entry) => entry.actionType === 'release').length, 1)
 })
 
-test('checkout dismissal releases an unresolved reservation exactly once without failing payment', async () => {
+test('checkout dismissal retains an unresolved reservation for the same payment retry', async () => {
   const mock = createMockFirestore({ totalStock: 5, reservedStock: 3, reservedQuantity: 3 })
   const { gateway } = createReconciliationGateway('pending', 7_725)
+  let createdOrderCount = 0
+  const createProviderOrder = gateway.orders.create
+  gateway.orders.create = async (...args) => {
+    createdOrderCount += 1
+    return createProviderOrder(...args)
+  }
   await createRazorpayPaymentOrder(createOrderInput(), {
     ...paymentConfiguration,
     firestore: mock.firestore,
@@ -898,22 +904,32 @@ test('checkout dismissal releases an unresolved reservation exactly once without
 
   assert.deepEqual(first, {
     status: 'pending',
-    inventoryStatus: 'released',
+    inventoryStatus: 'held',
     paymentOutcome: 'pending',
-    releaseOperationResult: 'released',
+    releaseOperationResult: 'retained_pending',
   })
   assert.equal(duplicate.status, first.status)
   assert.equal(duplicate.inventoryStatus, first.inventoryStatus)
-  assert.equal(duplicate.releaseOperationResult, 'already_released')
-  assert.deepEqual([product.totalStock, product.reservedStock, product.availableStock], [5, 0, 5])
+  assert.equal(duplicate.releaseOperationResult, 'retained_pending')
+  assert.deepEqual([product.totalStock, product.reservedStock, product.availableStock], [5, 3, 2])
   assert.equal(order.paymentStatus, 'pending')
   assert.equal(order.paymentAttempts[createHashForTest('checkout-attempt-key-001')].status, 'pending')
-  assert.equal(order.checkoutAbandoned, true)
-  assert.equal(order.inventoryOwnershipStatus, 'released')
-  assert.equal(mock.list('inventoryHistory').filter((entry) => entry.actionType === 'release').length, 1)
+  assert.notEqual(order.reservationStatus, 'released')
+  assert.notEqual(order.checkoutAbandoned, true)
+  assert.equal(order.inventoryOwnershipStatus, 'held')
+  assert.equal(mock.list('inventoryHistory').filter((entry) => entry.actionType === 'release').length, 0)
+
+  const retryOrder = await createRazorpayPaymentOrder(createOrderInput(), {
+    ...paymentConfiguration,
+    firestore: mock.firestore,
+    razorpay: gateway,
+  })
+  assert.equal(retryOrder.razorpayOrderId, 'order_reconcile1')
+  assert.equal(createdOrderCount, 1)
+  assert.equal(mock.list('orders').length, 1)
 })
 
-test('checkout dismissals release multiple reservations independently', async () => {
+test('checkout dismissals retain separate reservations independently', async () => {
   const secondReservationId = 'c26116ca-40bb-4a25-b255-099455ffea4f'
   const secondCancellationToken = 'b'.repeat(64)
   const mock = createMockFirestore({ totalStock: 5, reservedStock: 5, reservedQuantity: 3 })
@@ -952,10 +968,10 @@ test('checkout dismissals release multiple reservations independently', async ()
     firestore: mock.firestore,
     razorpay: firstGateway,
   })
-  assert.equal(firstDismissal.releaseOperationResult, 'released')
+  assert.equal(firstDismissal.releaseOperationResult, 'retained_pending')
   assert.deepEqual(
     [mock.get('products', 'product-1').reservedStock, mock.get('products', 'product-1').availableStock],
-    [2, 3],
+    [5, 0],
   )
   assert.equal(mock.get('orders', 'application-order-2').stockReserved, true)
 
@@ -968,15 +984,12 @@ test('checkout dismissals release multiple reservations independently', async ()
     firestore: mock.firestore,
     razorpay: secondGateway,
   })
-  assert.equal(secondDismissal.releaseOperationResult, 'released')
+  assert.equal(secondDismissal.releaseOperationResult, 'retained_pending')
   assert.deepEqual(
     [mock.get('products', 'product-1').reservedStock, mock.get('products', 'product-1').availableStock],
-    [0, 5],
+    [5, 0],
   )
-  assert.deepEqual(
-    mock.list('inventoryHistory').map((entry) => entry.reservationId).sort(),
-    [reservationId, secondReservationId].sort(),
-  )
+  assert.equal(mock.list('inventoryHistory').length, 0)
 })
 
 test('checkout dismissal preserves captured and authorized payment states', async () => {
@@ -1015,7 +1028,7 @@ test('checkout dismissal preserves captured and authorized payment states', asyn
   }
 })
 
-test('checkout dismissal releases stock on provider status outage and retains unresolved attempt', async () => {
+test('checkout dismissal retains stock on provider status outage and keeps the attempt unresolved', async () => {
   const mock = createMockFirestore({ totalStock: 5, reservedStock: 3, reservedQuantity: 3 })
   const { gateway: baseGateway } = createReconciliationGateway('pending', 7_725)
   const gateway = {
@@ -1044,12 +1057,12 @@ test('checkout dismissal releases stock on provider status outage and retains un
   })
   const order = mock.get('orders', 'application-order-1')
   assert.equal(result.status, 'pending')
-  assert.equal(result.inventoryStatus, 'released')
+  assert.equal(result.inventoryStatus, 'held')
   assert.equal(order.paymentStatus, 'pending')
-  assert.equal(order.checkoutAbandoned, true)
+  assert.notEqual(order.checkoutAbandoned, true)
   assert.equal(order.paymentAttempts[createHashForTest('checkout-attempt-key-001')].status, 'pending')
-  assert.equal(mock.get('products', 'product-1').availableStock, 5)
-  assert.equal(mock.list('inventoryHistory').filter((entry) => entry.actionType === 'release').length, 1)
+  assert.equal(mock.get('products', 'product-1').availableStock, 2)
+  assert.equal(mock.list('inventoryHistory').filter((entry) => entry.actionType === 'release').length, 0)
 })
 
 test('failure reports require reservation access and a server-fetched failed payment', async () => {

@@ -747,6 +747,65 @@ test('authorized and failed events update their own states without downgrading c
   assert.equal(capturedMock.get('orders', 'application-order-1').paymentStatus, 'captured')
 })
 
+test('a stale failure from an older attempt cannot replace the newer paid order state', async () => {
+  const mock = createMockFirestore()
+  mock.update('orders', 'application-order-1', {
+    paymentIdempotencyKeyHash: 'newer-attempt',
+    paymentStatus: 'captured',
+    paymentAttempts: {
+      'older-attempt': {
+        status: 'failed',
+        amount: 5150,
+        currency: 'INR',
+        receipt: 'payment-olderattempt0123456789abcdef',
+        razorpayOrderId: 'order_older1',
+        paymentId: 'pay_older1',
+        payments: { pay_older1: { status: 'failed' } },
+      },
+      'newer-attempt': {
+        status: 'captured',
+        amount: 5150,
+        currency: 'INR',
+        receipt: 'payment-newerattempt0123456789abcdef',
+        razorpayOrderId: 'order_newer1',
+        paymentId: 'pay_newer1',
+        payments: { pay_newer1: { status: 'captured' } },
+      },
+    },
+    razorpayOrderId: 'order_newer1',
+    razorpayPaymentId: 'pay_newer1',
+    razorpayOrderIds: ['order_older1', 'order_newer1'],
+    reservationStatus: 'converted',
+    stockReserved: false,
+    stockDeducted: true,
+    inventoryOwnershipStatus: 'consumed',
+    orderStatus: 'confirmed',
+  })
+  mock.update('products', 'product-1', {
+    totalStock: 3,
+    reservedStock: 0,
+    availableStock: 3,
+  })
+
+  await processRazorpayWebhookEvent({
+    eventId: 'evt_old_attempt_failure_after_retry_success',
+    ...paymentEvent('payment.failed', {
+      paymentId: 'pay_older1',
+      orderId: 'order_older1',
+      status: 'failed',
+    }),
+  }, paymentServiceOptions(mock.firestore))
+
+  const order = mock.get('orders', 'application-order-1')
+  assert.equal(order.paymentStatus, 'captured')
+  assert.equal(order.razorpayOrderId, 'order_newer1')
+  assert.equal(order.razorpayPaymentId, 'pay_newer1')
+  assert.equal(order.orderStatus, 'confirmed')
+  assert.equal(order.paymentAttempts['older-attempt'].status, 'failed')
+  assert.equal(order.paymentAttempts['newer-attempt'].status, 'captured')
+  assert.equal(mock.get('products', 'product-1').reservedStock, 0)
+})
+
 test('duplicate failure webhook events release reserved stock once', async () => {
   const mock = createMockFirestore()
   const event = paymentEvent('payment.failed', { status: 'failed' })
